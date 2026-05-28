@@ -39,6 +39,15 @@ class TestLitellmModel:
         assert mock_completion.call_args.kwargs["tools"] == [BASH_TOOL]
 
     @patch("minisweagent.models.litellm_model.litellm.completion")
+    def test_query_text_excludes_bash_tool(self, mock_completion):
+        model = LitellmModel(model_name="gpt-4")
+        model.query_text([{"role": "user", "content": "summarize"}], max_tokens=100)
+
+        mock_completion.assert_called_once()
+        assert "tools" not in mock_completion.call_args.kwargs
+        assert mock_completion.call_args.kwargs["max_tokens"] == 100
+
+    @patch("minisweagent.models.litellm_model.litellm.completion")
     @patch("minisweagent.models.litellm_model.litellm.cost_calculator.completion_cost")
     def test_parse_actions_valid_tool_call(self, mock_cost, mock_completion):
         tool_call = MagicMock()

@@ -72,6 +72,18 @@ class LitellmModel:
             e.message += " You can permanently set your API key with `mini-extra config set KEY VALUE`."
             raise e
 
+    def query_text(self, messages: list[dict[str, str]], **kwargs):
+        """Query the configured model without exposing tools."""
+        try:
+            return litellm.completion(
+                model=self.config.model_name,
+                messages=self._prepare_messages_for_api(messages),
+                **(self.config.model_kwargs | kwargs),
+            )
+        except litellm.exceptions.AuthenticationError as e:
+            e.message += " You can permanently set your API key with `mini-extra config set KEY VALUE`."
+            raise e
+
     def _prepare_messages_for_api(self, messages: list[dict]) -> list[dict]:
         prepared = [{k: v for k, v in msg.items() if k != "extra"} for msg in messages]
         prepared = _reorder_anthropic_thinking_blocks(prepared)

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -71,6 +72,15 @@ def toolcall_config():
     with open(config_path) as f:
         config = yaml.safe_load(f)
     return config["agent"]
+
+
+def minimal_agent_config(**kwargs):
+    return {
+        "system_template": "sys",
+        "instance_template": "{{task}}",
+        "cost_limit": 10.0,
+        **kwargs,
+    }
 
 
 def make_text_model(outputs_spec: list[tuple[str, list[dict]]], **kwargs) -> DeterministicModel:
@@ -456,3 +466,284 @@ def test_empty_actions_handling(model_factory):
     assert info["exit_status"] == "Submitted"
     assert info["submission"] == "done\n"
     assert agent.n_calls == 2
+
+
+def test_context_compaction_triggers_with_tiny_context_limit(monkeypatch):
+    """Tiny MAX_INPUT_TOKENS provides a manual path to force compaction."""
+    monkeypatch.setenv("MAX_INPUT_TOKENS", "400")
+    monkeypatch.setenv("MSWEA_CONTEXT_COMPACT_AT", "19")
+    monkeypatch.setenv("MSWEA_CONTEXT_COMPACT_TO", "50")
+    monkeypatch.setenv("MSWEA_CONTEXT_TAIL_TARGET_PERCENT", "25")
+    agent = DefaultAgent(
+        model=DeterministicModel(
+            outputs=[
+                make_output("step 1", [{"command": "echo one"}]),
+                make_output("step 2", [{"command": "echo two"}]),
+                make_output("step 3", [{"command": "echo three"}]),
+                make_output(
+                    "current objective: finish\n"
+                    "user constraints: preserve behavior\n"
+                    "files inspected: none\n"
+                    "files modified: none\n"
+                    "commands run: echo one, echo two, echo three\n"
+                    "test results: not run\n"
+                    "failed approaches: none\n"
+                    "current plan: submit\n"
+                    "remaining TODOs: submit final output\n"
+                    "important facts that must not be forgotten: prior echo commands completed",
+                    [],
+                ),
+                make_output(
+                    "done",
+                    [{"command": "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'\necho 'done'"}],
+                ),
+            ]
+        ),
+        env=LocalEnvironment(),
+        **minimal_agent_config(),
+    )
+
+    info = agent.run("Force compaction")
+
+    assert info["exit_status"] == "Submitted"
+    summaries = [msg for msg in agent.messages if msg.get("extra", {}).get("compact_summary")]
+    assert len(summaries) == 1
+    assert "current objective" in get_text(summaries[0])
+    assert get_text(agent.messages[0])
+    assert "Force compaction" in get_text(agent.messages[1])
+
+
+def test_context_compaction_skips_below_threshold(default_config, monkeypatch):
+    monkeypatch.setenv("MAX_INPUT_TOKENS", "100000")
+    agent = DefaultAgent(
+        model=DeterministicModel(
+            outputs=[
+                make_output("step 1", [{"command": "echo one"}]),
+                make_output(
+                    "done",
+                    [{"command": "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'\necho 'done'"}],
+                ),
+            ]
+        ),
+        env=LocalEnvironment(),
+        **{**default_config, "cost_limit": 10.0},
+    )
+
+    info = agent.run("Do not compact")
+
+    assert info["exit_status"] == "Submitted"
+    assert [msg for msg in agent.messages if msg.get("extra", {}).get("compact_summary")] == []
+    assert len(agent.messages) == 6
+
+
+def test_context_compaction_uses_env_thresholds(monkeypatch):
+    monkeypatch.setenv("MAX_INPUT_TOKENS", "600")
+    monkeypatch.setenv("MSWEA_CONTEXT_COMPACT_AT", "20")
+    monkeypatch.setenv("MSWEA_CONTEXT_COMPACT_TO", "50")
+    monkeypatch.setenv("MSWEA_CONTEXT_TAIL_TARGET_PERCENT", "25")
+    agent = DefaultAgent(
+        model=DeterministicModel(
+            outputs=[
+                make_output("step 1", [{"command": "echo one"}]),
+                make_output("step 2", [{"command": "echo two"}]),
+                make_output("step 3", [{"command": "echo three"}]),
+                make_output("step 4", [{"command": "echo four"}]),
+                make_output(
+                    "summary with current objective and remaining TODOs",
+                    [],
+                ),
+                make_output(
+                    "done",
+                    [{"command": "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'\necho 'done'"}],
+                ),
+            ]
+        ),
+        env=LocalEnvironment(),
+        **minimal_agent_config(),
+    )
+
+    info = agent.run("Use env thresholds")
+
+    assert info["exit_status"] == "Submitted"
+    assert [msg for msg in agent.messages if msg.get("extra", {}).get("compact_summary")]
+
+
+def test_debug_exchange_log_records_model_and_action_events(default_config, tmp_path, monkeypatch):
+    monkeypatch.setenv("MAX_INPUT_TOKENS", "100000")
+    debug_path = tmp_path / "debug-exchanges.jsonl"
+    agent = DefaultAgent(
+        model=DeterministicModel(
+            outputs=[
+                make_output("step 1", [{"command": "echo one"}]),
+                make_output(
+                    "done",
+                    [{"command": "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'\necho 'done'"}],
+                ),
+            ]
+        ),
+        env=LocalEnvironment(),
+        **{**default_config, "cost_limit": 10.0, "debug_exchange_path": debug_path},
+    )
+
+    info = agent.run("Debug normal run")
+    events = [json.loads(line) for line in debug_path.read_text().splitlines()]
+
+    assert info["exit_status"] == "Submitted"
+    assert [event for event in events if event["event"] == "run_start"]
+    assert len([event for event in events if event["event"] == "model_call"]) == 2
+    assert [event for event in events if event["event"] == "action_execution"]
+    assert [event for event in events if event["event"] == "run_end"]
+    assert not [event for event in events if event["event"] == "compaction_triggered"]
+
+
+def test_debug_exchange_log_records_compaction_summary_exchange(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAX_INPUT_TOKENS", "600")
+    monkeypatch.setenv("MSWEA_CONTEXT_COMPACT_AT", "19")
+    monkeypatch.setenv("MSWEA_CONTEXT_COMPACT_TO", "50")
+    monkeypatch.setenv("MSWEA_CONTEXT_TAIL_TARGET_PERCENT", "25")
+    debug_path = tmp_path / "debug-exchanges.jsonl"
+    agent = DefaultAgent(
+        model=DeterministicModel(
+            outputs=[
+                make_output("step 1", [{"command": "echo one"}]),
+                make_output("step 2", [{"command": "echo two"}]),
+                make_output("step 3", [{"command": "echo three"}]),
+                make_output("summary with current objective and remaining TODOs", []),
+                make_output(
+                    "done",
+                    [{"command": "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'\necho 'done'"}],
+                ),
+            ]
+        ),
+        env=LocalEnvironment(),
+        **minimal_agent_config(debug_exchange_path=debug_path),
+    )
+
+    info = agent.run("Debug compaction")
+    events = [json.loads(line) for line in debug_path.read_text().splitlines()]
+    summary_events = [event for event in events if event["event"] == "compaction_summary_call"]
+
+    assert info["exit_status"] == "Submitted"
+    triggered = [event for event in events if event["event"] == "compaction_triggered"]
+    assert triggered
+    assert triggered[0]["target"] == 300
+    assert triggered[0]["tail_target"] == 75
+    assert triggered[0]["summary_budget"] == 300 - triggered[0]["head_tokens"] - triggered[0]["tail_tokens"]
+    assert triggered[0]["tail_message_count"] > 0
+    assert summary_events
+    assert "Messages to summarize" in summary_events[0]["request_messages"][1]["content"]
+    assert f"Target length: {triggered[0]['summary_budget']} tokens." in summary_events[0]["request_messages"][1]["content"]
+    assert "This is a target, not a hard maximum" in summary_events[0]["request_messages"][1]["content"]
+    assert summary_events[0]["response_message"]["content"] == "summary with current objective and remaining TODOs"
+    assert summary_events[0]["summary"] == "summary with current objective and remaining TODOs"
+    assert [event for event in events if event["event"] == "compaction_finished"]
+
+
+def test_context_compaction_errors_when_newest_tail_group_does_not_fit(monkeypatch):
+    monkeypatch.setenv("MAX_INPUT_TOKENS", "400")
+    monkeypatch.setenv("MSWEA_CONTEXT_TAIL_TARGET_PERCENT", "10")
+    agent = DefaultAgent(
+        model=DeterministicModel(outputs=[]),
+        env=LocalEnvironment(),
+        **minimal_agent_config(),
+    )
+    agent.messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "old"},
+        {"role": "user", "content": "old observation"},
+        {
+            "role": "assistant",
+            "content": "newest action",
+            "extra": {"actions": [{"command": "echo newest"}]},
+        },
+        {"role": "user", "content": "returncode " + ("x" * 500)},
+    ]
+
+    with pytest.raises(RuntimeError, match="Newest tail message group does not fit"):
+        agent._choose_tail_start(agent.messages, token_budget=10)
+
+
+def test_context_compaction_tail_keeps_action_result_pair_whole(monkeypatch):
+    monkeypatch.setenv("MAX_INPUT_TOKENS", "800")
+    agent = DefaultAgent(
+        model=DeterministicModel(outputs=[]),
+        env=LocalEnvironment(),
+        **minimal_agent_config(),
+    )
+    agent.messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "old"},
+        {"role": "user", "content": "old observation"},
+        {
+            "role": "assistant",
+            "content": "newest action",
+            "extra": {"actions": [{"command": "echo newest"}]},
+        },
+        {"role": "user", "content": "returncode newest"},
+    ]
+
+    tail_start = agent._choose_tail_start(agent.messages, token_budget=30)
+
+    assert tail_start == 4
+    assert agent.messages[tail_start:][0]["role"] == "assistant"
+    assert agent.messages[tail_start:][1]["role"] == "user"
+
+
+def test_context_compaction_estimates_prepared_messages_without_extra(monkeypatch):
+    monkeypatch.setenv("MAX_INPUT_TOKENS", "1000")
+    monkeypatch.setenv("MSWEA_CONTEXT_COMPACT_AT", "60")
+    agent = DefaultAgent(
+        model=DeterministicModel(outputs=[]),
+        env=LocalEnvironment(),
+        **minimal_agent_config(),
+    )
+    agent.messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "task"},
+        {
+            "role": "assistant",
+            "content": "small",
+            "extra": {"response": {"raw": "x" * 10000}},
+        },
+        {
+            "role": "user",
+            "content": "small observation",
+            "extra": {"raw_output": "y" * 10000},
+        },
+    ]
+
+    assert agent._estimate_tokens(agent.messages) > 600
+    assert agent._estimate_api_tokens(agent.messages) < 600
+
+
+def test_context_compaction_chunks_middle_before_oversized_summary_call(tmp_path):
+    class RecordingTextModel(DeterministicModel):
+        def __init__(self):
+            super().__init__(outputs=[])
+            self.text_calls = []
+
+        def query_text(self, messages, **kwargs):
+            self.text_calls.append((messages, kwargs))
+            return {"choices": [{"message": {"role": "assistant", "content": f"summary {len(self.text_calls)}"}}]}
+
+    model = RecordingTextModel()
+    debug_path = tmp_path / "debug.jsonl"
+    agent = DefaultAgent(
+        model=model,
+        env=LocalEnvironment(),
+        **minimal_agent_config(debug_exchange_path=debug_path),
+    )
+    middle = [{"role": "user", "content": f"message {i} " + ("x" * 900)} for i in range(8)]
+
+    summary = agent._summarize_bounded(middle, token_budget=100, context_limit=1000)
+    events = [json.loads(line) for line in debug_path.read_text().splitlines()]
+
+    assert summary.startswith("summary")
+    assert len(model.text_calls) > 1
+    for messages, kwargs in model.text_calls:
+        assert agent._estimate_api_tokens(messages) + kwargs["max_tokens"] <= 1000
+    assert [event for event in events if event["event"] == "compaction_chunk_planned"]
+    assert [event for event in events if event["event"] == "compaction_chunk_summary_call"]
+    assert [event for event in events if event["event"] == "compaction_final_summary_call"]

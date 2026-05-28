@@ -107,8 +107,15 @@ class InteractiveAgent(DefaultAgent):
         except Submitted as e:
             self._check_for_new_task_or_submit(e)
         finally:
+            observation_messages = self.model.format_observation_messages(message, outputs, self.get_template_vars())
+            self._write_debug_event(
+                "action_execution",
+                actions=actions,
+                outputs=outputs,
+                observation_messages=observation_messages,
+            )
             result = self.add_messages(
-                *self.model.format_observation_messages(message, outputs, self.get_template_vars())
+                *observation_messages
             )
         return result
 
