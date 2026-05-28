@@ -94,6 +94,7 @@ nav:
       - "LitellmModel": "reference/models/litellm.md"
       - "LitellmResponseModel": "reference/models/litellm_response_toolcall.md"
       - "OpenRouterModel": "reference/models/openrouter.md"
+      - "OllamaModel": "reference/models/ollama.md"
       - "RequestyModel": "reference/models/requesty.md"
       - "PortkeyModel": "reference/models/portkey.md"
       - "PortkeyResponse": "reference/models/portkey_response.md"

@@ -65,6 +65,19 @@ setx KEY "value"
 # Default model name
 # (default: not set)
 MSWEA_MODEL_NAME="anthropic/claude-sonnet-4-5-20250929"
+
+# Default model class
+# (default: litellm)
+MSWEA_MODEL_CLASS="litellm"
+```
+
+For native Ollama, use a plain Ollama model name and configure the Ollama backend:
+
+```bash
+MSWEA_MODEL_CLASS="ollama"
+MSWEA_MODEL_NAME="qwen3-coder:30b"
+OLLAMA_API_BASE="http://localhost:11434"
+MSWEA_OLLAMA_TIMEOUT="600"
 ```
 
 To ignore errors from cost tracking checks (for example for free models), set:

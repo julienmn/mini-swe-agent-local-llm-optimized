@@ -259,8 +259,9 @@ We support the various models through different backends.
 By default (if you only specify the model name), we pick the best backend for you.
 This will almost always default to `litellm` (with Anthropic models being a special case as they need to have explicit cache breakpoint handling).
 
-However, there are a few other backends that you can use and specify with the `--model-class` flag or the
-`model.model_class` key in the agent config file (see previous section).
+However, there are a few other backends that you can use and specify with the `--model-class` flag, the
+`model.model_class` key in the agent config file (see previous section), or the `MSWEA_MODEL_CLASS`
+environment variable.
 
 For example:
 
@@ -276,6 +277,15 @@ For example:
     model:
         model_name: "moonshotai/kimi-k2-0905"
         model_class: openrouter
+    ```
+
+=== "Native Ollama model"
+
+    ```bash
+    MSWEA_MODEL_CLASS=ollama
+    MSWEA_MODEL_NAME=qwen3-coder:30b
+    OLLAMA_API_BASE=http://localhost:11434
+    MSWEA_OLLAMA_TIMEOUT=600
     ```
 
 === "Portkey model"
@@ -300,6 +310,8 @@ For example:
 
 * **`portkey`** ([`PortkeyModel`](../reference/models/portkey.md)) - Integration with [Portkey](https://portkey.ai/) for accessing various models with enhanced observability, caching, and routing features. Note that this still uses `litellm` to calculate costs.
 
+* **`ollama`** ([`OllamaModel`](../reference/models/ollama.md)) - Direct local Ollama integration through `/api/chat`. Use a plain Ollama model name such as `qwen3-coder:30b`.
+
 On top, there's a few more exotic model classes that you can use:
 
 * **`deterministic`** ([`DeterministicModel`](../reference/models/test_models.md)) - Returns predefined responses for testing and development purposes.
@@ -308,4 +320,3 @@ On top, there's a few more exotic model classes that you can use:
 As with the last two, you can also specify any import path to your own custom model class (even if it is not yet part of the mini-SWE-agent package).
 
 --8<-- "docs/_footer.md"
-
