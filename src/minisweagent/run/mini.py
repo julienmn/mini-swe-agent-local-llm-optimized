@@ -21,6 +21,7 @@ from minisweagent.utils.serialize import UNSET, recursive_merge
 
 DEFAULT_CONFIG_FILE = Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini.yaml"))
 DEFAULT_OUTPUT_FILE = global_config_dir / "last_mini_run.traj.json"
+DEFAULT_DEBUG_EXCHANGE_FILE = global_config_dir / "last_mini_run.debug-exchanges.jsonl"
 
 
 _HELP_TEXT = """Run mini-SWE-agent in your local environment.
@@ -50,6 +51,12 @@ console = Console(highlight=False)
 app = typer.Typer(rich_markup_mode="rich")
 
 
+def _default_debug_exchange_path(output: Path | None) -> Path:
+    if output:
+        return output.with_suffix(".debug-exchanges.jsonl")
+    return DEFAULT_DEBUG_EXCHANGE_FILE
+
+
 # fmt: off
 @app.command(help=_HELP_TEXT)
 def main(
@@ -62,6 +69,8 @@ def main(
     cost_limit: float | None = typer.Option(None, "-l", "--cost-limit", help="Cost limit. Set to 0 to disable."),
     config_spec: list[str] = typer.Option([str(DEFAULT_CONFIG_FILE)], "-c", "--config", help=_CONFIG_SPEC_HELP_TEXT),
     output: Path | None = typer.Option(DEFAULT_OUTPUT_FILE, "-o", "--output", help="Output trajectory file"),
+    debug_exchanges: bool = typer.Option(False, "--debug-exchanges", help="Write full model exchange debug JSONL to the default path.", rich_help_panel="Advanced"),
+    debug_exchanges_path: Path | None = typer.Option(None, "--debug-exchanges-path", help="Write full model exchange debug JSONL to this path.", rich_help_panel="Advanced"),
     exit_immediately: bool = typer.Option(False, "--exit-immediately", help="Exit immediately when the agent wants to finish instead of prompting.", rich_help_panel="Advanced"),
 ) -> Any:
     # fmt: on
@@ -80,6 +89,9 @@ def main(
             "cost_limit": cost_limit if cost_limit is not None else UNSET,
             "confirm_exit": False if exit_immediately else UNSET,
             "output_path": output or UNSET,
+            "debug_exchange_path": debug_exchanges_path
+            if debug_exchanges_path is not None
+            else (_default_debug_exchange_path(output) if debug_exchanges else UNSET),
         },
         "model": {
             "model_class": model_class or UNSET,
@@ -102,6 +114,8 @@ def main(
     agent.run(run_task)
     if (output_path := config.get("agent", {}).get("output_path")):
         console.print(f"Saved trajectory to [bold green]'{output_path}'[/bold green]")
+    if debug_exchange_path := config.get("agent", {}).get("debug_exchange_path"):
+        console.print(f"Saved debug exchanges to [bold green]'{debug_exchange_path}'[/bold green]")
     return agent
 
 

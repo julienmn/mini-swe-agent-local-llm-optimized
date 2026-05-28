@@ -560,6 +560,82 @@ def test_exit_immediately_flag_with_typer_runner():
         assert args[2].get("confirm_exit") is False
 
 
+def test_debug_exchanges_flag_uses_default_sibling_path(tmp_path):
+    """Test --debug-exchanges configures the default debug exchange path."""
+    from typer.testing import CliRunner
+
+    output_file = tmp_path / "test_traj.json"
+    with (
+        patch("minisweagent.run.mini.configure_if_first_time"),
+        patch("minisweagent.run.mini.get_agent") as mock_get_agent,
+        patch("minisweagent.run.mini.get_model") as mock_get_model,
+        patch("minisweagent.run.mini.get_environment") as mock_get_env,
+        patch("minisweagent.run.mini.get_config_from_spec") as mock_get_config,
+    ):
+        mock_get_model.return_value = Mock()
+        mock_get_env.return_value = Mock()
+        mock_get_config.return_value = {"agent": {"system_template": "test"}, "env": {}, "model": {}}
+        mock_agent = Mock()
+        mock_agent.run.return_value = {"exit_status": "Success", "submission": "Result"}
+        mock_get_agent.return_value = mock_agent
+
+        result = CliRunner().invoke(
+            app,
+            [
+                "--task",
+                "Test task",
+                "--model",
+                "test-model",
+                "--output",
+                str(output_file),
+                "--debug-exchanges",
+            ],
+        )
+
+        assert result.exit_code == 0
+        args, _kwargs = mock_get_agent.call_args
+        assert args[2]["debug_exchange_path"] == output_file.with_suffix(".debug-exchanges.jsonl")
+
+
+def test_debug_exchanges_path_overrides_default(tmp_path):
+    """Test --debug-exchanges-path configures an explicit debug exchange path."""
+    from typer.testing import CliRunner
+
+    output_file = tmp_path / "test_traj.json"
+    debug_file = tmp_path / "custom-debug.jsonl"
+    with (
+        patch("minisweagent.run.mini.configure_if_first_time"),
+        patch("minisweagent.run.mini.get_agent") as mock_get_agent,
+        patch("minisweagent.run.mini.get_model") as mock_get_model,
+        patch("minisweagent.run.mini.get_environment") as mock_get_env,
+        patch("minisweagent.run.mini.get_config_from_spec") as mock_get_config,
+    ):
+        mock_get_model.return_value = Mock()
+        mock_get_env.return_value = Mock()
+        mock_get_config.return_value = {"agent": {"system_template": "test"}, "env": {}, "model": {}}
+        mock_agent = Mock()
+        mock_agent.run.return_value = {"exit_status": "Success", "submission": "Result"}
+        mock_get_agent.return_value = mock_agent
+
+        result = CliRunner().invoke(
+            app,
+            [
+                "--task",
+                "Test task",
+                "--model",
+                "test-model",
+                "--output",
+                str(output_file),
+                "--debug-exchanges-path",
+                str(debug_file),
+            ],
+        )
+
+        assert result.exit_code == 0
+        args, _kwargs = mock_get_agent.call_args
+        assert args[2]["debug_exchange_path"] == debug_file
+
+
 def test_output_file_is_created(tmp_path):
     """Test that output trajectory file is created when --output is specified."""
     from typer.testing import CliRunner
