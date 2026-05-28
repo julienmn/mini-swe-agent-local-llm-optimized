@@ -50,31 +50,48 @@ class TestGetModelClass:
         """Test that anthropic-related model names return LitellmModel by default."""
         from minisweagent.models.litellm_model import LitellmModel
 
-        for name in ["anthropic", "sonnet", "opus", "claude-sonnet", "claude-opus"]:
-            assert get_model_class(name) == LitellmModel
+        with patch.dict(os.environ, {}, clear=True):
+            for name in ["anthropic", "sonnet", "opus", "claude-sonnet", "claude-opus"]:
+                assert get_model_class(name) == LitellmModel
 
     def test_litellm_model_fallback(self):
         """Test that non-anthropic model names return LitellmModel."""
         from minisweagent.models.litellm_model import LitellmModel
 
-        for name in ["gpt-4", "gpt-3.5-turbo", "llama2", "random-model"]:
-            assert get_model_class(name) == LitellmModel
+        with patch.dict(os.environ, {}, clear=True):
+            for name in ["gpt-4", "gpt-3.5-turbo", "llama2", "random-model"]:
+                assert get_model_class(name) == LitellmModel
 
     def test_partial_matches(self):
         """Test that partial string matches work correctly."""
         from minisweagent.models.litellm_model import LitellmModel
 
-        assert get_model_class("my-anthropic-model") == LitellmModel
-        assert get_model_class("sonnet-latest") == LitellmModel
-        assert get_model_class("opus-v2") == LitellmModel
-        assert get_model_class("gpt-anthropic-style") == LitellmModel
-        assert get_model_class("totally-different") == LitellmModel
+        with patch.dict(os.environ, {}, clear=True):
+            assert get_model_class("my-anthropic-model") == LitellmModel
+            assert get_model_class("sonnet-latest") == LitellmModel
+            assert get_model_class("opus-v2") == LitellmModel
+            assert get_model_class("gpt-anthropic-style") == LitellmModel
+            assert get_model_class("totally-different") == LitellmModel
 
     def test_litellm_response_model_selection(self):
         """Test that litellm_response model class can be selected."""
         from minisweagent.models.litellm_response_model import LitellmResponseModel
 
         assert get_model_class("any-model", "litellm_response") == LitellmResponseModel
+
+    def test_model_class_env_fallback(self):
+        """Test that MSWEA_MODEL_CLASS is used when no model_class is configured."""
+        from minisweagent.models.ollama_model import OllamaModel
+
+        with patch.dict(os.environ, {"MSWEA_MODEL_CLASS": "ollama"}):
+            assert get_model_class("qwen3-coder:30b") is OllamaModel
+
+    def test_config_model_class_overrides_env(self):
+        """Test that explicit model_class takes precedence over MSWEA_MODEL_CLASS."""
+        from minisweagent.models.litellm_model import LitellmModel
+
+        with patch.dict(os.environ, {"MSWEA_MODEL_CLASS": "ollama"}):
+            assert get_model_class("qwen3-coder:30b", "litellm") is LitellmModel
 
 
 class TestGetModel:

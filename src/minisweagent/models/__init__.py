@@ -85,6 +85,7 @@ _MODEL_CLASS_MAPPING = {
     "portkey": "minisweagent.models.portkey_model.PortkeyModel",
     "portkey_response": "minisweagent.models.portkey_response_model.PortkeyResponseAPIModel",
     "requesty": "minisweagent.models.requesty_model.RequestyModel",
+    "ollama": "minisweagent.models.ollama_model.OllamaModel",
     "deterministic": "minisweagent.models.test_models.DeterministicModel",
 }
 
@@ -97,6 +98,9 @@ def get_model_class(model_name: str, model_class: str = "") -> type:
     it takes precedence over the `model_name`.
     Otherwise, the model_name is used to select the best model class.
     """
+    if not model_class:
+        model_class = os.getenv("MSWEA_MODEL_CLASS", "")
+
     if model_class:
         full_path = _MODEL_CLASS_MAPPING.get(model_class, model_class)
         try:
