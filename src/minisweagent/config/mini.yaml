@@ -110,7 +110,10 @@ environment:
     TQDM_DISABLE: '1'
 model:
   observation_template: |
-    {%- if output.output | length < 10000 -%}
+    {%- set output_limit = (MSWEA_OBSERVATION_OUTPUT_LIMIT | default(10000) | int) -%}
+    {%- set output_head_chars = output_limit // 2 -%}
+    {%- set output_tail_chars = output_limit - output_head_chars -%}
+    {%- if output.output | length < output_limit -%}
     {
       "returncode": {{ output.returncode }},
       "output": {{ output.output | tojson }}
@@ -119,9 +122,9 @@ model:
     {%- else -%}
     {
       "returncode": {{ output.returncode }},
-      "output_head": {{ output.output[:5000] | tojson }},
-      "output_tail": {{ output.output[-5000:] | tojson }},
-      "elided_chars": {{ output.output | length - 10000 }},
+      "output_head": {{ output.output[:output_head_chars] | tojson }},
+      "output_tail": {{ output.output[-output_tail_chars:] | tojson }},
+      "elided_chars": {{ output.output | length - output_limit }},
       "warning": "Output too long."
       {%- if output.exception_info %}, "exception_info": {{ output.exception_info | tojson }}{% endif %}
     }

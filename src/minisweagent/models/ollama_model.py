@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import time
+from copy import deepcopy
 from typing import Any
 
 import requests
@@ -18,6 +19,11 @@ from minisweagent.models.utils.openai_multimodal import expand_multimodal_conten
 logger = logging.getLogger("ollama_model")
 
 LITELLM_ONLY_OPTIONS = {"drop_params"}
+OLLAMA_BASH_TOOL = deepcopy(BASH_TOOL)
+OLLAMA_BASH_TOOL["function"]["description"] = (
+    "Execute a bash command. Conserve context: do not dump whole files unless they are known small. "
+    "Prefer targeted reads with rg, sed -n, nl -ba file | sed -n, head, or tail."
+)
 
 
 class OllamaModelConfig(BaseModel):
@@ -54,6 +60,8 @@ class OllamaModel:
     def __init__(self, **kwargs):
         self.config = OllamaModelConfig(**kwargs)
         self._api_url = self.config.base_url.rstrip("/") + "/api/chat"
+        self._last_provider_request = None
+        self._last_provider_response = None
 
     def _options(self, kwargs: dict) -> dict:
         options = self.config.model_kwargs | kwargs
@@ -75,20 +83,39 @@ class OllamaModel:
             "options": self._options(kwargs),
         }
         if tools:
-            payload["tools"] = [BASH_TOOL]
+            payload["tools"] = [OLLAMA_BASH_TOOL]
+        body = json.dumps(payload)
+        headers = {"Content-Type": "application/json"}
+        self._last_provider_request = {
+            "provider": "ollama",
+            "method": "POST",
+            "url": self._api_url,
+            "headers": headers,
+            "body": body,
+            "payload": payload,
+            "timeout": self.config.timeout,
+        }
+        self._last_provider_response = None
 
         try:
             response = requests.post(
                 self._api_url,
-                headers={"Content-Type": "application/json"},
-                data=json.dumps(payload),
+                headers=headers,
+                data=body,
                 timeout=self.config.timeout,
             )
             response.raise_for_status()
-            return response.json()
+            response_json = response.json()
+            self._last_provider_response = response_json
+            return response_json
         except requests.exceptions.HTTPError as e:
+            self._last_provider_response = {
+                "status_code": response.status_code,
+                "text": response.text,
+            }
             raise OllamaAPIError(f"HTTP {response.status_code}: {response.text}") from e
         except requests.exceptions.RequestException as e:
+            self._last_provider_response = {"error": repr(e)}
             raise OllamaAPIError(f"Request failed: {e}") from e
 
     def query_text(self, messages: list[dict[str, str]], **kwargs) -> dict:

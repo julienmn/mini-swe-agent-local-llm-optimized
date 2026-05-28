@@ -79,6 +79,12 @@ class DefaultAgent:
             return None
         return prepare(messages)
 
+    def _provider_exchange_for_debug(self) -> dict:
+        return {
+            "provider_request": getattr(self.model, "_last_provider_request", None),
+            "provider_response": getattr(self.model, "_last_provider_response", None),
+        }
+
     def get_template_vars(self, **kwargs) -> dict:
         return recursive_merge(
             self.config.model_dump(),
@@ -245,6 +251,7 @@ class DefaultAgent:
                 input_tokens=request_tokens,
                 request_kwargs={"max_tokens": token_budget},
                 raw_response=response,
+                **self._provider_exchange_for_debug(),
                 summary=summary,
             )
             return summary
@@ -269,6 +276,7 @@ class DefaultAgent:
                 input_tokens=request_tokens,
                 request_kwargs=request_kwargs,
                 raw_response=response,
+                **self._provider_exchange_for_debug(),
                 summary=summary,
             )
             return summary
@@ -281,6 +289,7 @@ class DefaultAgent:
             input_tokens=request_tokens,
             request_kwargs={},
             response_message=message,
+            **self._provider_exchange_for_debug(),
             summary=summary,
         )
         return summary
@@ -517,6 +526,7 @@ class DefaultAgent:
                 request_messages=request_messages,
                 prepared_messages=prepared_messages,
                 input_tokens=request_tokens,
+                **self._provider_exchange_for_debug(),
                 error=repr(e),
             )
             raise
@@ -528,6 +538,7 @@ class DefaultAgent:
             input_tokens=request_tokens,
             response_message=message,
             raw_response=message.get("extra", {}).get("response"),
+            **self._provider_exchange_for_debug(),
             usage=(message.get("extra", {}).get("response") or {}).get("usage")
             if isinstance(message.get("extra", {}).get("response"), dict)
             else None,
