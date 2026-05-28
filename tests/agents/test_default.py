@@ -14,6 +14,7 @@ from minisweagent.models.test_models import (
     make_response_api_output,
     make_toolcall_output,
 )
+from minisweagent.models.ollama_model import OllamaModel
 
 # --- Helper functions to abstract message format differences ---
 
@@ -86,6 +87,14 @@ def minimal_agent_config(**kwargs):
 def make_text_model(outputs_spec: list[tuple[str, list[dict]]], **kwargs) -> DeterministicModel:
     """Create a DeterministicModel from a list of (content, actions) tuples."""
     return DeterministicModel(outputs=[make_output(content, actions) for content, actions in outputs_spec], **kwargs)
+
+
+class DebugProviderDeterministicModel(DeterministicModel):
+    def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
+        self._last_provider_request = {"provider": "debug-test", "messages": messages, "kwargs": kwargs}
+        output = super().query(messages, **kwargs)
+        self._last_provider_response = {"message": output}
+        return output
 
 
 def make_tc_model(outputs_spec: list[tuple[str, list[dict]]], **kwargs) -> DeterministicToolcallModel:
@@ -594,6 +603,65 @@ def test_debug_exchange_log_records_model_and_action_events(default_config, tmp_
     assert [event for event in events if event["event"] == "action_execution"]
     assert [event for event in events if event["event"] == "run_end"]
     assert not [event for event in events if event["event"] == "compaction_triggered"]
+
+
+def test_debug_exchange_log_records_provider_request_and_response(default_config, tmp_path, monkeypatch):
+    monkeypatch.setenv("MAX_INPUT_TOKENS", "100000")
+    debug_path = tmp_path / "debug-exchanges.jsonl"
+    agent = DefaultAgent(
+        model=DebugProviderDeterministicModel(
+            outputs=[
+                make_output("step 1", [{"command": "echo one"}]),
+                make_output("done", [{"command": "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'"}]),
+            ]
+        ),
+        env=LocalEnvironment(),
+        **{**default_config, "cost_limit": 10.0, "debug_exchange_path": debug_path},
+    )
+
+    agent.run("Debug provider exchange")
+    events = [json.loads(line) for line in debug_path.read_text().splitlines()]
+    model_event = [event for event in events if event["event"] == "model_call"][0]
+
+    assert model_event["provider_request"]["provider"] == "debug-test"
+    assert model_event["provider_request"]["messages"][0]["role"] == "system"
+    assert model_event["provider_response"]["message"]["content"] == "step 1"
+
+
+def test_debug_exchange_log_records_ollama_provider_payload(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAX_INPUT_TOKENS", "100000")
+    debug_path = tmp_path / "debug-exchanges.jsonl"
+    response = type("Response", (), {})()
+    response.raise_for_status = lambda: None
+    response.json = lambda: {
+        "message": {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"function": {"name": "bash", "arguments": {"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}}}
+            ],
+        }
+    }
+
+    def fake_post(*args, **kwargs):
+        return response
+
+    monkeypatch.setattr("requests.post", fake_post)
+    agent = DefaultAgent(
+        model=OllamaModel(model_name="qwen3-coder:30b"),
+        env=LocalEnvironment(),
+        **minimal_agent_config(debug_exchange_path=debug_path),
+    )
+
+    agent.run("Debug Ollama provider payload")
+    events = [json.loads(line) for line in debug_path.read_text().splitlines()]
+    model_event = [event for event in events if event["event"] == "model_call"][0]
+
+    assert model_event["provider_request"]["provider"] == "ollama"
+    assert model_event["provider_request"]["payload"]["tools"][0]["function"]["name"] == "bash"
+    assert "Conserve context" in model_event["provider_request"]["payload"]["tools"][0]["function"]["description"]
+    assert model_event["provider_request"]["body"] == json.dumps(model_event["provider_request"]["payload"])
+    assert model_event["provider_response"]["message"]["tool_calls"][0]["function"]["name"] == "bash"
 
 
 def test_debug_exchange_log_records_compaction_summary_exchange(tmp_path, monkeypatch):

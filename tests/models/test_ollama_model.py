@@ -6,7 +6,7 @@ import requests
 
 from minisweagent.exceptions import FormatError
 from minisweagent.models import get_model_class
-from minisweagent.models.ollama_model import OllamaAPIError, OllamaModel
+from minisweagent.models.ollama_model import OLLAMA_BASH_TOOL, OllamaAPIError, OllamaModel
 from minisweagent.models.utils.actions_toolcall import BASH_TOOL
 
 
@@ -50,9 +50,16 @@ def test_query_sends_native_chat_tools():
     assert request["model"] == "qwen3-coder:30b"
     assert request["messages"] == [{"role": "user", "content": "test"}]
     assert request["stream"] is False
-    assert request["tools"] == [BASH_TOOL]
+    assert request["tools"] == [OLLAMA_BASH_TOOL]
+    assert "Conserve context" in request["tools"][0]["function"]["description"]
+    assert BASH_TOOL["function"]["description"] == "Execute a bash command"
     assert request["options"] == {"temperature": 0}
     assert "Produce JSON OUTPUT ONLY" not in mock_post.call_args.kwargs["data"]
+    assert model._last_provider_request["url"] == "http://localhost:11434/api/chat"
+    assert model._last_provider_request["payload"] == request
+    assert model._last_provider_request["body"] == mock_post.call_args.kwargs["data"]
+    assert model._last_provider_request["timeout"] == 600
+    assert model._last_provider_response == payload
     assert result["extra"]["actions"] == [{"command": "echo test", "tool_call_id": "call_ollama_0"}]
     assert result["extra"]["cost"] == 0.0
 

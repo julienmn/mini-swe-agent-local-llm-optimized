@@ -57,30 +57,44 @@ class LitellmModel:
 
     def __init__(self, *, config_class: Callable = LitellmModelConfig, **kwargs):
         self.config = config_class(**kwargs)
+        self._last_provider_request = None
+        self._last_provider_response = None
         if self.config.litellm_model_registry and Path(self.config.litellm_model_registry).is_file():
             litellm.utils.register_model(json.loads(Path(self.config.litellm_model_registry).read_text()))
 
     def _query(self, messages: list[dict[str, str]], **kwargs):
+        request_kwargs = {
+            "model": self.config.model_name,
+            "messages": messages,
+            "tools": [BASH_TOOL],
+            **(self.config.model_kwargs | kwargs),
+        }
+        self._last_provider_request = {"provider": "litellm.completion", "kwargs": request_kwargs}
+        self._last_provider_response = None
         try:
-            return litellm.completion(
-                model=self.config.model_name,
-                messages=messages,
-                tools=[BASH_TOOL],
-                **(self.config.model_kwargs | kwargs),
-            )
+            response = litellm.completion(**request_kwargs)
+            self._last_provider_response = response.model_dump() if hasattr(response, "model_dump") else response
+            return response
         except litellm.exceptions.AuthenticationError as e:
+            self._last_provider_response = {"error": repr(e)}
             e.message += " You can permanently set your API key with `mini-extra config set KEY VALUE`."
             raise e
 
     def query_text(self, messages: list[dict[str, str]], **kwargs):
         """Query the configured model without exposing tools."""
+        request_kwargs = {
+            "model": self.config.model_name,
+            "messages": self._prepare_messages_for_api(messages),
+            **(self.config.model_kwargs | kwargs),
+        }
+        self._last_provider_request = {"provider": "litellm.completion", "kwargs": request_kwargs}
+        self._last_provider_response = None
         try:
-            return litellm.completion(
-                model=self.config.model_name,
-                messages=self._prepare_messages_for_api(messages),
-                **(self.config.model_kwargs | kwargs),
-            )
+            response = litellm.completion(**request_kwargs)
+            self._last_provider_response = response.model_dump() if hasattr(response, "model_dump") else response
+            return response
         except litellm.exceptions.AuthenticationError as e:
+            self._last_provider_response = {"error": repr(e)}
             e.message += " You can permanently set your API key with `mini-extra config set KEY VALUE`."
             raise e
 
