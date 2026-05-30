@@ -4,7 +4,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from minisweagent.agents.default import DefaultAgent
+from minisweagent.agents.default import (
+    WHOLE_FILE_CAT_FORBIDDEN_OUTPUT,
+    DefaultAgent,
+    is_forbidden_whole_file_cat,
+)
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.exceptions import FormatError
 from minisweagent.models import GLOBAL_MODEL_STATS
@@ -139,6 +143,18 @@ class AssertingReadableRequestWrittenModel(PreparedDeterministicModel):
         return response
 
 
+class RecordingEnvironment:
+    def __init__(self):
+        self.actions = []
+
+    def execute(self, action: dict) -> dict:
+        self.actions.append(action)
+        return {"output": "executed", "returncode": 0, "exception_info": ""}
+
+    def get_template_vars(self, **kwargs) -> dict:
+        return kwargs
+
+
 def make_tc_model(outputs_spec: list[tuple[str, list[dict]]], **kwargs) -> DeterministicToolcallModel:
     """Create a DeterministicToolcallModel from a list of (content, actions) tuples."""
     outputs = []
@@ -185,6 +201,47 @@ def model_factory(request, default_config, toolcall_config):
 
 
 # --- Tests ---
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat src/foo.py",
+        "cat ./src/foo.py",
+        "cat a.py b.py",
+    ],
+)
+def test_whole_file_cat_guard_rejects_obvious_reads(command):
+    assert is_forbidden_whole_file_cat(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat <<'EOF' > newfile.py",
+        "cat src/foo.py | head -50",
+        "cat src/foo.py|head -50",
+        "cat ./src/listening_room/user_text_overlay.py | sed -n '532,570p'",
+    ],
+)
+def test_whole_file_cat_guard_allows_bounded_or_write_uses(command):
+    assert not is_forbidden_whole_file_cat(command)
+
+
+def test_default_agent_rejects_whole_file_cat_without_executing():
+    env = RecordingEnvironment()
+    agent = DefaultAgent(
+        model=make_text_model([]),
+        env=env,
+        **minimal_agent_config(),
+    )
+    message = make_output("Read file", [{"command": "cat src/foo.py"}])
+
+    observations = agent.execute_actions(message)
+
+    assert env.actions == []
+    assert len(observations) == 1
+    assert WHOLE_FILE_CAT_FORBIDDEN_OUTPUT in get_observation_text(observations[0])
 
 
 def test_successful_completion(model_factory):

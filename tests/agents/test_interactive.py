@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from minisweagent.agents.default import WHOLE_FILE_CAT_FORBIDDEN_OUTPUT
 from minisweagent.agents.interactive import InteractiveAgent
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models.test_models import (
@@ -98,6 +99,18 @@ def _make_model(outputs: list[tuple[str, list[dict]]], **kwargs) -> Deterministi
     return make_text_model(outputs, **kwargs)
 
 
+class RecordingEnvironment:
+    def __init__(self):
+        self.actions = []
+
+    def execute(self, action: dict) -> dict:
+        self.actions.append(action)
+        return {"output": "executed", "returncode": 0, "exception_info": ""}
+
+    def get_template_vars(self, **kwargs) -> dict:
+        return kwargs
+
+
 # --- Fixtures ---
 
 
@@ -148,6 +161,25 @@ def test_successful_completion_with_confirmation(model_factory):
         assert info["exit_status"] == "Submitted"
         assert info["submission"] == "completed\n"
         assert agent.n_calls == 1
+
+
+def test_interactive_agent_rejects_whole_file_cat_without_executing():
+    env = RecordingEnvironment()
+    agent = InteractiveAgent(
+        model=make_text_model([]),
+        env=env,
+        system_template="sys",
+        instance_template="{{task}}",
+        cost_limit=10.0,
+        mode="yolo",
+    )
+    message = make_output("Read file", [{"command": "cat ./src/foo.py"}])
+
+    observations = agent.execute_actions(message)
+
+    assert env.actions == []
+    assert len(observations) == 1
+    assert WHOLE_FILE_CAT_FORBIDDEN_OUTPUT in get_text(observations[0])
 
 
 def test_action_rejection_and_recovery(model_factory):

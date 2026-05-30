@@ -5,6 +5,8 @@ or https://minimal-agent.com for a tutorial on the basic building principles.
 import json
 import logging
 import os
+import re
+import shlex
 import time
 import traceback
 from pathlib import Path
@@ -18,6 +20,60 @@ from minisweagent.models.utils.content_string import get_content_string
 from minisweagent.utils.serialize import recursive_merge
 
 compaction_logger = logging.getLogger("minisweagent.agent.compaction")
+
+WHOLE_FILE_CAT_FORBIDDEN_OUTPUT = "Output of whole files IS FORBIDDEN. Use symbol based targeted reads instead."
+
+
+def _shell_tokens(command: str) -> list[str]:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;<>")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    return list(lexer)
+
+
+def _is_bounded_cat_pipe(tokens: list[str], pipe_index: int) -> bool:
+    if pipe_index + 1 >= len(tokens):
+        return False
+    if tokens[pipe_index + 1] == "head":
+        return True
+    if tokens[pipe_index + 1] != "sed":
+        return False
+    sed_args = tokens[pipe_index + 2 :]
+    if sed_args and sed_args[0] == "-n":
+        sed_args = sed_args[1:]
+    return bool(sed_args) and bool(re.fullmatch(r"\d+(?:,\d+)?p", sed_args[0]))
+
+
+def is_forbidden_whole_file_cat(command: str) -> bool:
+    """Return true for obvious unbounded whole-file `cat` reads."""
+    try:
+        tokens = _shell_tokens(command)
+    except ValueError:
+        return False
+
+    command_separators = {";", "&&", "||"}
+    i = 0
+    while i < len(tokens):
+        segment_end = i
+        while segment_end < len(tokens) and tokens[segment_end] not in command_separators:
+            segment_end += 1
+        segment = tokens[i:segment_end]
+        if segment and segment[0] == "cat":
+            if any(token.startswith("<") or token.startswith(">") for token in segment):
+                i = segment_end + 1
+                continue
+            if "|" in segment:
+                pipe_index = segment.index("|")
+                if len(segment[1:pipe_index]) > 0 and not _is_bounded_cat_pipe(segment, pipe_index):
+                    return True
+            elif len(segment) > 1:
+                return True
+        i = segment_end + 1
+    return False
+
+
+def forbidden_whole_file_cat_output() -> dict:
+    return {"output": WHOLE_FILE_CAT_FORBIDDEN_OUTPUT, "returncode": 1, "exception_info": ""}
 
 
 class AgentConfig(BaseModel):
@@ -191,9 +247,7 @@ class DefaultAgent:
         if tool_calls:
             output.append(tool_calls)
         extra_keys = [
-            key
-            for key in sorted(message)
-            if key not in {"role", "type", "content", "output", "tool_calls", "extra"}
+            key for key in sorted(message) if key not in {"role", "type", "content", "output", "tool_calls", "extra"}
         ]
         if extra_keys:
             metadata = {key: message[key] for key in extra_keys}
@@ -207,7 +261,11 @@ class DefaultAgent:
         output = []
         for key, value in payload.items():
             output.append(f"#### `{key}`\n")
-            if key in {"messages", "input"} and isinstance(value, list) and all(isinstance(item, dict) for item in value):
+            if (
+                key in {"messages", "input"}
+                and isinstance(value, list)
+                and all(isinstance(item, dict) for item in value)
+            ):
                 output.append(self._render_debug_messages(value))
             else:
                 output.append(self._render_debug_code_block(json.dumps(value, indent=2, default=str), language="json"))
@@ -269,9 +327,7 @@ class DefaultAgent:
         )
         return exchange_index
 
-    def _write_readable_provider_response(
-        self, exchange_index: int | None, response=None, *, error: str = ""
-    ) -> None:
+    def _write_readable_provider_response(self, exchange_index: int | None, response=None, *, error: str = "") -> None:
         if not self.config.debug_exchange_readable_path or exchange_index is None:
             return
         if error:
@@ -485,7 +541,9 @@ class DefaultAgent:
             prepared_messages = prepare(summary_messages)
             readable_debug_callback = self._readable_debug_callback(event, input_tokens=request_tokens)
             try:
-                response = raw_query(prepared_messages, **request_kwargs, readable_debug_callback=readable_debug_callback)
+                response = raw_query(
+                    prepared_messages, **request_kwargs, readable_debug_callback=readable_debug_callback
+                )
             except TypeError:
                 request_kwargs = {"max_tokens": token_budget}
                 response = raw_query(
@@ -793,7 +851,7 @@ class DefaultAgent:
         outputs = []
         try:
             for action in actions:
-                outputs.append(self.env.execute(action))
+                outputs.append(self._execute_action(action))
         finally:
             observation_messages = self.model.format_observation_messages(message, outputs, self.get_template_vars())
             self._write_debug_event(
@@ -803,6 +861,11 @@ class DefaultAgent:
                 observation_messages=observation_messages,
             )
         return self.add_messages(*observation_messages)
+
+    def _execute_action(self, action: dict) -> dict:
+        if is_forbidden_whole_file_cat(action.get("command", "")):
+            return forbidden_whole_file_cat_output()
+        return self.env.execute(action)
 
     def serialize(self, *extra_dicts) -> dict:
         """Serialize agent state to a json-compatible nested dictionary for saving."""
