@@ -38,14 +38,24 @@ class LitellmResponseModel(LitellmModel):
         return result
 
     def _query(self, messages: list[dict[str, str]], **kwargs):
+        readable_debug_callback = kwargs.pop("readable_debug_callback", None)
+        request_kwargs = {
+            "model": self.config.model_name,
+            "input": messages,
+            "tools": [BASH_TOOL_RESPONSE_API],
+            **(self.config.model_kwargs | kwargs),
+        }
         try:
-            return litellm.responses(
-                model=self.config.model_name,
-                input=messages,
-                tools=[BASH_TOOL_RESPONSE_API],
-                **(self.config.model_kwargs | kwargs),
-            )
+            if readable_debug_callback:
+                readable_debug_callback("request", provider="litellm.responses", payload=request_kwargs)
+            response = litellm.responses(**request_kwargs)
+            response_payload = response.model_dump() if hasattr(response, "model_dump") else response
+            if readable_debug_callback:
+                readable_debug_callback("response", provider="litellm.responses", response=response_payload)
+            return response
         except litellm.exceptions.AuthenticationError as e:
+            if readable_debug_callback:
+                readable_debug_callback("error", provider="litellm.responses", error=repr(e))
             e.message += " You can permanently set your API key with `mini-extra config set KEY VALUE`."
             raise e
 

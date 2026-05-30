@@ -64,6 +64,7 @@ class LitellmModel:
             litellm.utils.register_model(json.loads(Path(self.config.litellm_model_registry).read_text()))
 
     def _query(self, messages: list[dict[str, str]], **kwargs):
+        readable_debug_callback = kwargs.pop("readable_debug_callback", None)
         request_kwargs = {
             "model": self.config.model_name,
             "messages": messages,
@@ -73,16 +74,23 @@ class LitellmModel:
         self._last_provider_request = {"provider": "litellm.completion", "kwargs": request_kwargs}
         self._last_provider_response = None
         try:
+            if readable_debug_callback:
+                readable_debug_callback("request", provider="litellm.completion", payload=request_kwargs)
             response = litellm.completion(**request_kwargs)
             self._last_provider_response = response.model_dump() if hasattr(response, "model_dump") else response
+            if readable_debug_callback:
+                readable_debug_callback("response", provider="litellm.completion", response=self._last_provider_response)
             return response
         except litellm.exceptions.AuthenticationError as e:
             self._last_provider_response = {"error": repr(e)}
+            if readable_debug_callback:
+                readable_debug_callback("error", provider="litellm.completion", error=repr(e))
             e.message += " You can permanently set your API key with `mini-extra config set KEY VALUE`."
             raise e
 
     def query_text(self, messages: list[dict[str, str]], **kwargs):
         """Query the configured model without exposing tools."""
+        readable_debug_callback = kwargs.pop("readable_debug_callback", None)
         request_kwargs = {
             "model": self.config.model_name,
             "messages": self._prepare_messages_for_api(messages),
@@ -91,11 +99,17 @@ class LitellmModel:
         self._last_provider_request = {"provider": "litellm.completion", "kwargs": request_kwargs}
         self._last_provider_response = None
         try:
+            if readable_debug_callback:
+                readable_debug_callback("request", provider="litellm.completion", payload=request_kwargs)
             response = litellm.completion(**request_kwargs)
             self._last_provider_response = response.model_dump() if hasattr(response, "model_dump") else response
+            if readable_debug_callback:
+                readable_debug_callback("response", provider="litellm.completion", response=self._last_provider_response)
             return response
         except litellm.exceptions.AuthenticationError as e:
             self._last_provider_response = {"error": repr(e)}
+            if readable_debug_callback:
+                readable_debug_callback("error", provider="litellm.completion", error=repr(e))
             e.message += " You can permanently set your API key with `mini-extra config set KEY VALUE`."
             raise e
 

@@ -57,6 +57,18 @@ def _default_debug_exchange_path(output: Path | None) -> Path:
     return DEFAULT_DEBUG_EXCHANGE_FILE
 
 
+def _readable_debug_exchange_path(path: Path) -> Path:
+    if path.suffix == ".jsonl":
+        return path.with_suffix(".readable.md")
+    return path.with_name(f"{path.name}.readable.md")
+
+
+def _default_readable_debug_exchange_path(output: Path | None) -> Path:
+    if output:
+        return output.with_suffix(".debug-exchanges-readable.md")
+    return DEFAULT_DEBUG_EXCHANGE_FILE.with_name("last_mini_run.debug-exchanges-readable.md")
+
+
 # fmt: off
 @app.command(help=_HELP_TEXT)
 def main(
@@ -79,6 +91,18 @@ def main(
     # Build the config from the command line arguments
     console.print(f"Building agent config from specs: [bold green]{config_spec}[/bold green]")
     configs = [get_config_from_spec(spec) for spec in config_spec]
+    debug_exchanges = debug_exchanges if isinstance(debug_exchanges, bool) else False
+    debug_exchanges_path = debug_exchanges_path if isinstance(debug_exchanges_path, Path) else None
+    debug_exchange_path = (
+        debug_exchanges_path
+        if debug_exchanges_path is not None
+        else (_default_debug_exchange_path(output) if debug_exchanges else UNSET)
+    )
+    debug_exchange_readable_path = (
+        _readable_debug_exchange_path(debug_exchanges_path)
+        if debug_exchanges_path is not None
+        else (_default_readable_debug_exchange_path(output) if debug_exchanges else UNSET)
+    )
     configs.append({
         "run": {
             "task": task or UNSET,
@@ -89,9 +113,8 @@ def main(
             "cost_limit": cost_limit if cost_limit is not None else UNSET,
             "confirm_exit": False if exit_immediately else UNSET,
             "output_path": output or UNSET,
-            "debug_exchange_path": debug_exchanges_path
-            if debug_exchanges_path is not None
-            else (_default_debug_exchange_path(output) if debug_exchanges else UNSET),
+            "debug_exchange_path": debug_exchange_path,
+            "debug_exchange_readable_path": debug_exchange_readable_path,
         },
         "model": {
             "model_class": model_class or UNSET,
@@ -116,6 +139,8 @@ def main(
         console.print(f"Saved trajectory to [bold green]'{output_path}'[/bold green]")
     if debug_exchange_path := config.get("agent", {}).get("debug_exchange_path"):
         console.print(f"Saved debug exchanges to [bold green]'{debug_exchange_path}'[/bold green]")
+    if debug_exchange_readable_path := config.get("agent", {}).get("debug_exchange_readable_path"):
+        console.print(f"Saved readable debug exchanges to [bold green]'{debug_exchange_readable_path}'[/bold green]")
     return agent
 
 

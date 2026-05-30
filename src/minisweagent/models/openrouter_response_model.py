@@ -42,6 +42,7 @@ class OpenRouterResponseModel(OpenRouterModel):
         self._api_url = "https://openrouter.ai/api/v1/responses"
 
     def _query(self, messages: list[dict[str, str]], **kwargs):
+        readable_debug_callback = kwargs.pop("readable_debug_callback", None)
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
@@ -53,10 +54,17 @@ class OpenRouterResponseModel(OpenRouterModel):
             **(self.config.model_kwargs | kwargs),
         }
         try:
+            if readable_debug_callback:
+                readable_debug_callback("request", provider="openrouter.responses", payload=payload)
             response = requests.post(self._api_url, headers=headers, data=json.dumps(payload), timeout=60)
             response.raise_for_status()
-            return response.json()
+            response_json = response.json()
+            if readable_debug_callback:
+                readable_debug_callback("response", provider="openrouter.responses", response=response_json)
+            return response_json
         except requests.exceptions.HTTPError as e:
+            if readable_debug_callback:
+                readable_debug_callback("error", provider="openrouter.responses", error=repr(e))
             if response.status_code == 401:
                 error_msg = "Authentication failed. You can permanently set your API key with `mini-extra config set OPENROUTER_API_KEY YOUR_KEY`."
                 raise OpenRouterAuthenticationError(error_msg) from e
@@ -65,6 +73,8 @@ class OpenRouterResponseModel(OpenRouterModel):
             else:
                 raise OpenRouterAPIError(f"HTTP {response.status_code}: {response.text}") from e
         except requests.exceptions.RequestException as e:
+            if readable_debug_callback:
+                readable_debug_callback("error", provider="openrouter.responses", error=repr(e))
             raise OpenRouterAPIError(f"Request failed: {e}") from e
 
     def _prepare_messages_for_api(self, messages: list[dict]) -> list[dict]:

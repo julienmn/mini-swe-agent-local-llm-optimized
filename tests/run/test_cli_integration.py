@@ -595,6 +595,7 @@ def test_debug_exchanges_flag_uses_default_sibling_path(tmp_path):
         assert result.exit_code == 0
         args, _kwargs = mock_get_agent.call_args
         assert args[2]["debug_exchange_path"] == output_file.with_suffix(".debug-exchanges.jsonl")
+        assert args[2]["debug_exchange_readable_path"] == output_file.with_suffix(".debug-exchanges-readable.md")
 
 
 def test_debug_exchanges_path_overrides_default(tmp_path):
@@ -634,6 +635,7 @@ def test_debug_exchanges_path_overrides_default(tmp_path):
         assert result.exit_code == 0
         args, _kwargs = mock_get_agent.call_args
         assert args[2]["debug_exchange_path"] == debug_file
+        assert args[2]["debug_exchange_readable_path"] == debug_file.with_suffix(".readable.md")
 
 
 def test_output_file_is_created(tmp_path):

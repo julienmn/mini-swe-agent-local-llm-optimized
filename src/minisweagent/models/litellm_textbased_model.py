@@ -18,11 +18,19 @@ class LitellmTextbasedModel(LitellmModel):
         super().__init__(config_class=LitellmTextbasedModelConfig, **kwargs)
 
     def _query(self, messages: list[dict[str, str]], **kwargs):
+        readable_debug_callback = kwargs.pop("readable_debug_callback", None)
+        request_kwargs = {"model": self.config.model_name, "messages": messages, **(self.config.model_kwargs | kwargs)}
         try:
-            return litellm.completion(
-                model=self.config.model_name, messages=messages, **(self.config.model_kwargs | kwargs)
-            )
+            if readable_debug_callback:
+                readable_debug_callback("request", provider="litellm.completion", payload=request_kwargs)
+            response = litellm.completion(**request_kwargs)
+            response_payload = response.model_dump() if hasattr(response, "model_dump") else response
+            if readable_debug_callback:
+                readable_debug_callback("response", provider="litellm.completion", response=response_payload)
+            return response
         except litellm.exceptions.AuthenticationError as e:
+            if readable_debug_callback:
+                readable_debug_callback("error", provider="litellm.completion", error=repr(e))
             e.message += " You can permanently set your API key with `mini-extra config set KEY VALUE`."
             raise e
 

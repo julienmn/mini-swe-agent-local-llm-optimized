@@ -72,12 +72,25 @@ class PortkeyResponseAPIModel:
         self.client = Portkey(**client_kwargs)
 
     def _query(self, messages: list[dict[str, str]], **kwargs):
-        return self.client.responses.create(
-            model=self.config.model_name,
-            input=messages,
-            tools=[BASH_TOOL_RESPONSE_API],
+        readable_debug_callback = kwargs.pop("readable_debug_callback", None)
+        request_kwargs = {
+            "model": self.config.model_name,
+            "input": messages,
+            "tools": [BASH_TOOL_RESPONSE_API],
             **(self.config.model_kwargs | kwargs),
-        )
+        }
+        try:
+            if readable_debug_callback:
+                readable_debug_callback("request", provider="portkey.responses.create", payload=request_kwargs)
+            response = self.client.responses.create(**request_kwargs)
+            response_payload = response.model_dump() if hasattr(response, "model_dump") else response
+            if readable_debug_callback:
+                readable_debug_callback("response", provider="portkey.responses.create", response=response_payload)
+            return response
+        except Exception as e:
+            if readable_debug_callback:
+                readable_debug_callback("error", provider="portkey.responses.create", error=repr(e))
+            raise
 
     def _prepare_messages_for_api(self, messages: list[dict]) -> list[dict]:
         """Prepare messages for Portkey's stateless Responses API.

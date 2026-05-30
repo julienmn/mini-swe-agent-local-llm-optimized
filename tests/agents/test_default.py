@@ -99,6 +99,46 @@ class DebugProviderDeterministicModel(DeterministicModel):
         return output
 
 
+class PreparedDeterministicModel(DeterministicModel):
+    def _prepare_messages_for_api(self, messages: list[dict]) -> list[dict]:
+        return [{key: value for key, value in message.items() if key != "extra"} for message in messages]
+
+    def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
+        readable_debug_callback = kwargs.pop("readable_debug_callback", None)
+        payload = {"model": self.config.model_name, "messages": self._prepare_messages_for_api(messages)}
+        if readable_debug_callback:
+            readable_debug_callback("request", provider="deterministic", payload=payload)
+        try:
+            response = super().query(messages, **kwargs)
+        except Exception as e:
+            if readable_debug_callback:
+                readable_debug_callback("error", provider="deterministic", error=repr(e))
+            raise
+        if readable_debug_callback:
+            readable_debug_callback("response", provider="deterministic", response=response)
+        return response
+
+
+class AssertingReadableRequestWrittenModel(PreparedDeterministicModel):
+    def __init__(self, *, readable_path: Path, **kwargs):
+        super().__init__(**kwargs)
+        self.readable_path = readable_path
+
+    def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
+        readable_debug_callback = kwargs.pop("readable_debug_callback", None)
+        payload = {"model": self.config.model_name, "messages": self._prepare_messages_for_api(messages)}
+        if readable_debug_callback:
+            readable_debug_callback("request", provider="deterministic", payload=payload)
+        assert self.readable_path.exists()
+        text = self.readable_path.read_text()
+        assert "### Sent to provider" in text
+        assert "### Provider response" not in text
+        response = super(PreparedDeterministicModel, self).query(messages, **kwargs)
+        if readable_debug_callback:
+            readable_debug_callback("response", provider="deterministic", response=response)
+        return response
+
+
 def make_tc_model(outputs_spec: list[tuple[str, list[dict]]], **kwargs) -> DeterministicToolcallModel:
     """Create a DeterministicToolcallModel from a list of (content, actions) tuples."""
     outputs = []
@@ -714,6 +754,66 @@ def test_debug_exchange_log_records_provider_request_and_response(default_config
     assert model_event["provider_response"]["message"]["content"] == "step 1"
 
 
+def test_readable_debug_exchange_writes_request_before_response(default_config, tmp_path, monkeypatch):
+    monkeypatch.setenv("MAX_INPUT_TOKENS", "100000")
+    readable_path = tmp_path / "debug-exchanges-readable.md"
+    agent = DefaultAgent(
+        model=AssertingReadableRequestWrittenModel(
+            readable_path=readable_path,
+            outputs=[make_output("done", [{"command": "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'"}])],
+        ),
+        env=LocalEnvironment(),
+        **{**default_config, "cost_limit": 10.0, "debug_exchange_readable_path": readable_path},
+    )
+
+    agent.run("Debug readable request timing")
+    text = readable_path.read_text()
+
+    assert "## Exchange 0: `model_call`" in text
+    assert "### Sent to provider" in text
+    assert "### Provider response" in text
+    assert text.index("### Sent to provider") < text.index("### Provider response")
+    assert "done" in text
+
+
+def test_readable_debug_exchange_requires_exact_model_bound_messages(default_config, tmp_path, monkeypatch):
+    monkeypatch.setenv("MAX_INPUT_TOKENS", "100000")
+    agent = DefaultAgent(
+        model=DeterministicModel(outputs=[make_output("done", [])]),
+        env=LocalEnvironment(),
+        **{**default_config, "cost_limit": 10.0, "debug_exchange_readable_path": tmp_path / "readable.md"},
+    )
+
+    with pytest.raises(RuntimeError, match="report the exact provider request payload"):
+        agent.run("Debug readable strict mode")
+
+
+def test_readable_debug_exchange_clips_tool_results_only_in_markdown(default_config, tmp_path, monkeypatch):
+    monkeypatch.setenv("MAX_INPUT_TOKENS", "100000")
+    readable_path = tmp_path / "debug-exchanges-readable.md"
+    command = "printf '" + "\\n".join(f"line {i}" for i in range(1, 31)) + "\\n'"
+    agent = DefaultAgent(
+        model=PreparedDeterministicModel(
+            outputs=[
+                make_output("step 1", [{"command": command}]),
+                make_output("done", [{"command": "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'"}]),
+            ]
+        ),
+        env=LocalEnvironment(),
+        **{**default_config, "cost_limit": 10.0, "debug_exchange_readable_path": readable_path},
+    )
+
+    agent.run("Debug readable clipping")
+    text = readable_path.read_text()
+
+    assert "line 25" in text
+    assert "...[clipped after 25 lines; " in text
+    clipped_observation = text.split("<output>", 1)[1].split("</output>", 1)[0]
+    assert "line 26" not in clipped_observation
+    assert "\\nline 2" not in clipped_observation
+    assert any("line 30" in msg.get("extra", {}).get("raw_output", "") for msg in agent.messages)
+
+
 def test_debug_exchange_log_records_ollama_provider_payload(tmp_path, monkeypatch):
     monkeypatch.setenv("MAX_INPUT_TOKENS", "100000")
     debug_path = tmp_path / "debug-exchanges.jsonl"
@@ -745,9 +845,42 @@ def test_debug_exchange_log_records_ollama_provider_payload(tmp_path, monkeypatc
 
     assert model_event["provider_request"]["provider"] == "ollama"
     assert model_event["provider_request"]["payload"]["tools"][0]["function"]["name"] == "bash"
-    assert "Conserve context" in model_event["provider_request"]["payload"]["tools"][0]["function"]["description"]
     assert model_event["provider_request"]["body"] == json.dumps(model_event["provider_request"]["payload"])
     assert model_event["provider_response"]["message"]["tool_calls"][0]["function"]["name"] == "bash"
+
+
+def test_readable_debug_exchange_records_ollama_provider_payload(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAX_INPUT_TOKENS", "100000")
+    readable_path = tmp_path / "debug-exchanges-readable.md"
+    response = type("Response", (), {})()
+    response.raise_for_status = lambda: None
+    response.json = lambda: {
+        "message": {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"function": {"name": "bash", "arguments": {"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}}}
+            ],
+        }
+    }
+
+    monkeypatch.setattr("requests.post", lambda *args, **kwargs: response)
+    agent = DefaultAgent(
+        model=OllamaModel(model_name="qwen3-coder:30b"),
+        env=LocalEnvironment(),
+        **minimal_agent_config(debug_exchange_readable_path=readable_path),
+    )
+
+    agent.run("Debug readable Ollama provider payload")
+    text = readable_path.read_text()
+
+    assert "### Sent to provider" in text
+    assert "`tools`" in text
+    assert "`model`" in text
+    assert "`messages`" in text
+    assert "`stream`" in text
+    assert "`options`" in text
+    assert "### Provider response" in text
 
 
 def test_debug_exchange_log_records_compaction_summary_exchange(tmp_path, monkeypatch):

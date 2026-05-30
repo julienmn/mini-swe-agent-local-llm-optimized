@@ -39,6 +39,8 @@ class AgentConfig(BaseModel):
     """Save the trajectory to this path."""
     debug_exchange_path: Path | None = None
     """Append full model exchange debug events to this JSONL file."""
+    debug_exchange_readable_path: Path | None = None
+    """Append readable model exchange debug events to this Markdown file."""
 
 
 class DefaultAgent:
@@ -54,6 +56,7 @@ class DefaultAgent:
         self.n_calls = 0
         self.n_consecutive_format_errors = 0
         self._debug_event_index = 0
+        self._readable_exchange_index = 0
         self._start_time = time.time()
 
     def _write_debug_event(self, event: str, **data) -> None:
@@ -84,6 +87,222 @@ class DefaultAgent:
             "provider_request": getattr(self.model, "_last_provider_request", None),
             "provider_response": getattr(self.model, "_last_provider_response", None),
         }
+
+    def _debug_markdown_text(self, value) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list) and all(isinstance(item, dict) and "text" in item for item in value):
+            return "\n\n".join(str(item["text"]) for item in value)
+        return json.dumps(value, indent=2, default=str)
+
+    def _is_tool_result_message(self, message: dict) -> bool:
+        return (
+            message.get("role") == "tool"
+            or message.get("type") == "function_call_output"
+            or (message.get("role") == "user" and "returncode" in self._debug_markdown_text(message.get("content")))
+        )
+
+    def _clip_tool_result_text(self, text: str, *, limit: int = 25) -> str:
+        if "<output>" in text and "</output>" in text:
+            before, rest = text.split("<output>", 1)
+            body, after = rest.split("</output>", 1)
+            prefix = before + "<output>"
+            suffix = "</output>" + after
+            body_prefix = "\n" if body.startswith("\n") else ""
+            body_suffix = "\n" if body.endswith("\n") else ""
+            clipped_body = self._clip_tool_result_text(body.strip("\n"), limit=limit)
+            return prefix + body_prefix + clipped_body + body_suffix + suffix
+        lines = text.splitlines()
+        if len(lines) <= limit:
+            return text
+        clipped = "\n".join(lines[:limit])
+        return f"{clipped}\n...[clipped after {limit} lines; {len(lines) - limit} more lines omitted]"
+
+    def _render_debug_code_block(self, text: str, *, language: str = "text") -> str:
+        fence = "```"
+        while fence in text:
+            fence += "`"
+        return f"{fence}{language}\n{text}\n{fence}\n"
+
+    def _render_debug_tool_calls(self, message: dict) -> str:
+        rendered = []
+        for i, tool_call in enumerate(message.get("tool_calls") or [], 1):
+            rendered.append(self._render_debug_tool_call(tool_call, i))
+        return "\n".join(rendered)
+
+    def _render_debug_tool_call(self, tool_call: dict, index: int) -> str:
+        function = tool_call.get("function", {})
+        name = function.get("name") or tool_call.get("name") or "unknown"
+        arguments = function.get("arguments", tool_call.get("arguments", ""))
+        rendered = [f"Tool call {index}: `{name}`\n"]
+        if isinstance(arguments, str):
+            try:
+                parsed_arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                parsed_arguments = {"arguments": arguments}
+        else:
+            parsed_arguments = arguments
+        command = parsed_arguments.get("command") if isinstance(parsed_arguments, dict) else None
+        if command is not None:
+            rendered.append(self._render_debug_code_block(str(command), language="bash"))
+        else:
+            rendered.append(
+                self._render_debug_code_block(json.dumps(parsed_arguments, indent=2, default=str), language="json")
+            )
+        return "\n".join(rendered)
+
+    def _render_debug_response_output(self, message: dict) -> str:
+        output_items = message.get("output")
+        if not isinstance(output_items, list):
+            return ""
+        rendered = []
+        for i, item in enumerate(output_items, 1):
+            item_type = item.get("type", "output") if isinstance(item, dict) else "output"
+            rendered.append(f"Output item {i}: `{item_type}`\n")
+            if isinstance(item, dict) and item_type == "message":
+                content = self._debug_markdown_text(item.get("content"))
+                if content:
+                    rendered.append(self._render_debug_code_block(content))
+            elif isinstance(item, dict) and item_type == "function_call":
+                rendered.append(self._render_debug_tool_call(item, i))
+            else:
+                rendered.append(self._render_debug_code_block(json.dumps(item, indent=2, default=str), language="json"))
+        return "\n".join(rendered)
+
+    def _render_debug_message(self, message: dict, index: int) -> str:
+        role = message.get("role") or message.get("type") or "message"
+        output = [f"#### Message {index}: `{role}`\n"]
+        if "content" in message:
+            content = self._debug_markdown_text(message.get("content"))
+            if self._is_tool_result_message(message):
+                content = self._clip_tool_result_text(content)
+            if content:
+                output.append(self._render_debug_code_block(content))
+        if "output" in message and message.get("type") == "function_call_output":
+            content = self._clip_tool_result_text(self._debug_markdown_text(message.get("output")))
+            output.append(self._render_debug_code_block(content))
+        elif "output" in message:
+            rendered_output = self._render_debug_response_output(message)
+            if rendered_output:
+                output.append(rendered_output)
+        tool_calls = self._render_debug_tool_calls(message)
+        if tool_calls:
+            output.append(tool_calls)
+        extra_keys = [
+            key
+            for key in sorted(message)
+            if key not in {"role", "type", "content", "output", "tool_calls", "extra"}
+        ]
+        if extra_keys:
+            metadata = {key: message[key] for key in extra_keys}
+            output.append(self._render_debug_code_block(json.dumps(metadata, indent=2, default=str), language="json"))
+        return "\n".join(output).rstrip() + "\n"
+
+    def _render_debug_messages(self, messages: list[dict]) -> str:
+        return "\n".join(self._render_debug_message(message, i) for i, message in enumerate(messages, 1))
+
+    def _render_debug_provider_payload(self, payload: dict) -> str:
+        output = []
+        for key, value in payload.items():
+            output.append(f"#### `{key}`\n")
+            if key in {"messages", "input"} and isinstance(value, list) and all(isinstance(item, dict) for item in value):
+                output.append(self._render_debug_messages(value))
+            else:
+                output.append(self._render_debug_code_block(json.dumps(value, indent=2, default=str), language="json"))
+        return "\n".join(output).rstrip() + "\n"
+
+    def _render_debug_provider_response(self, response) -> str:
+        if not isinstance(response, dict):
+            return self._render_debug_code_block(json.dumps(response, indent=2, default=str), language="json")
+        output = []
+        for key, value in response.items():
+            output.append(f"#### `{key}`\n")
+            if key == "message" and isinstance(value, dict):
+                output.append(self._render_debug_message(value, 1))
+            elif key == "choices" and isinstance(value, list):
+                for i, choice in enumerate(value, 1):
+                    output.append(f"Choice {i}\n")
+                    message = choice.get("message") if isinstance(choice, dict) else None
+                    if isinstance(message, dict):
+                        output.append(self._render_debug_message(message, i))
+                    else:
+                        output.append(
+                            self._render_debug_code_block(json.dumps(choice, indent=2, default=str), language="json")
+                        )
+            elif key == "output" and isinstance(value, list):
+                output.append(self._render_debug_response_output({"output": value}))
+            else:
+                output.append(self._render_debug_code_block(json.dumps(value, indent=2, default=str), language="json"))
+        return "\n".join(output).rstrip() + "\n"
+
+    def _write_readable_debug(self, text: str, *, reset: bool = False) -> None:
+        if not self.config.debug_exchange_readable_path:
+            return
+        self.config.debug_exchange_readable_path.parent.mkdir(parents=True, exist_ok=True)
+        mode = "w" if reset else "a"
+        with self.config.debug_exchange_readable_path.open(mode) as f:
+            f.write(text)
+
+    def _write_readable_provider_request(
+        self, event: str, provider: str, payload: dict, *, input_tokens: int
+    ) -> int | None:
+        if not self.config.debug_exchange_readable_path:
+            return None
+        exchange_index = self._readable_exchange_index
+        self._readable_exchange_index += 1
+        reset = exchange_index == 0
+        header = "# mini-swe-agent readable debug exchanges\n\n" if reset else ""
+        exchange_separator = "" if reset else "------------------------------\n\n"
+        self._write_readable_debug(
+            header
+            + exchange_separator
+            + f"## Exchange {exchange_index}: `{event}`\n\n"
+            + f"- model_call: {self.n_calls}\n"
+            + f"- provider: {provider}\n"
+            + f"- input_tokens_estimate: {input_tokens}\n\n"
+            + "### Sent to provider\n\n"
+            + self._render_debug_provider_payload(payload)
+            + "\n",
+            reset=reset,
+        )
+        return exchange_index
+
+    def _write_readable_provider_response(
+        self, exchange_index: int | None, response=None, *, error: str = ""
+    ) -> None:
+        if not self.config.debug_exchange_readable_path or exchange_index is None:
+            return
+        if error:
+            body = "### Provider error\n\n" + self._render_debug_code_block(error)
+        else:
+            body = "### Provider response\n\n" + self._render_debug_provider_response(response)
+        self._write_readable_debug(body + "\n")
+
+    def _readable_debug_callback(self, event: str, *, input_tokens: int):
+        exchange_index = None
+
+        def callback(phase: str, provider: str, payload=None, response=None, error: str = "") -> None:
+            nonlocal exchange_index
+            if phase == "request":
+                callback.request_logged = True
+                exchange_index = self._write_readable_provider_request(
+                    event, provider, payload or {}, input_tokens=input_tokens
+                )
+            elif phase == "response":
+                self._write_readable_provider_response(exchange_index, response=response)
+            elif phase == "error":
+                self._write_readable_provider_response(exchange_index, error=error)
+
+        callback.request_logged = False
+        return callback
+
+    def _assert_readable_debug_callback_used(self, callback) -> None:
+        if self.config.debug_exchange_readable_path and not getattr(callback, "request_logged", False):
+            raise RuntimeError(
+                "Readable debug exchanges require the model adapter to report the exact provider request payload."
+            )
 
     def get_template_vars(self, **kwargs) -> dict:
         return recursive_merge(
@@ -177,7 +396,9 @@ class DefaultAgent:
             candidate = group + tail
             if self._estimate_api_tokens(candidate) > token_budget:
                 if not tail:
-                    raise RuntimeError("Newest tail message group does not fit in the configured compaction tail budget.")
+                    raise RuntimeError(
+                        "Newest tail message group does not fit in the configured compaction tail budget."
+                    )
                 break
             tail = candidate
         return len(messages) - len(tail)
@@ -208,10 +429,10 @@ class DefaultAgent:
     def _compaction_summary_messages(self, messages: list[dict], token_budget: int) -> list[dict]:
         messages_json = json.dumps(self._api_messages(messages), separators=(",", ":"), default=str)
         prompt = (
-            "Summarize the older middle of a mini-swe-agent run so the same run can continue. "
+            "Summarize a mini-swe-agent run so the same run can continue. "
             "Do not call tools. Preserve enough concrete detail for the next model call to continue safely. "
             "Include these headings: "
-            "current objective, user constraints, files inspected, files modified, commands run, test results, "
+            "current objective, files inspected, files modified, commands run, important test results, "
             "failed approaches, current plan, remaining TODOs, important facts that must not be forgotten.\n\n"
             f"Target length: {token_budget} tokens. This is a target, not a hard maximum; "
             "do not omit important facts just to make the summary shorter.\n\n"
@@ -237,7 +458,11 @@ class DefaultAgent:
         text_query = getattr(self.model, "query_text", None)
         if text_query:
             prepared_messages = self._prepared_messages_for_debug(summary_messages)
-            response = text_query(summary_messages, max_tokens=token_budget)
+            readable_debug_callback = self._readable_debug_callback(event, input_tokens=request_tokens)
+            response = text_query(
+                summary_messages, max_tokens=token_budget, readable_debug_callback=readable_debug_callback
+            )
+            self._assert_readable_debug_callback_used(readable_debug_callback)
             if hasattr(response, "model_dump"):
                 response = response.model_dump()
             if isinstance(response, dict) and response.get("choices"):
@@ -258,11 +483,15 @@ class DefaultAgent:
         if raw_query:
             prepare = getattr(self.model, "_prepare_messages_for_api", lambda messages: messages)
             prepared_messages = prepare(summary_messages)
+            readable_debug_callback = self._readable_debug_callback(event, input_tokens=request_tokens)
             try:
-                response = raw_query(prepared_messages, **request_kwargs)
+                response = raw_query(prepared_messages, **request_kwargs, readable_debug_callback=readable_debug_callback)
             except TypeError:
                 request_kwargs = {"max_tokens": token_budget}
-                response = raw_query(prepared_messages, max_tokens=token_budget)
+                response = raw_query(
+                    prepared_messages, max_tokens=token_budget, readable_debug_callback=readable_debug_callback
+                )
+            self._assert_readable_debug_callback_used(readable_debug_callback)
             if hasattr(response, "model_dump"):
                 response = response.model_dump()
             if isinstance(response, dict) and response.get("choices"):
@@ -280,7 +509,9 @@ class DefaultAgent:
                 summary=summary,
             )
             return summary
-        message = self.model.query(summary_messages)
+        readable_debug_callback = self._readable_debug_callback(event, input_tokens=request_tokens)
+        message = self.model.query(summary_messages, readable_debug_callback=readable_debug_callback)
+        self._assert_readable_debug_callback_used(readable_debug_callback)
         summary = get_content_string(message)
         self._write_debug_event(
             event,
@@ -294,10 +525,11 @@ class DefaultAgent:
         )
         return summary
 
-    def _summarize_bounded(
-        self, messages: list[dict], token_budget: int, context_limit: int, *, depth: int = 0
-    ) -> str:
-        if self._estimate_api_tokens(self._compaction_summary_messages(messages, token_budget)) + token_budget <= context_limit:
+    def _summarize_bounded(self, messages: list[dict], token_budget: int, context_limit: int, *, depth: int = 0) -> str:
+        if (
+            self._estimate_api_tokens(self._compaction_summary_messages(messages, token_budget)) + token_budget
+            <= context_limit
+        ):
             event = "compaction_final_summary_call" if depth else "compaction_summary_call"
             return self._query_compaction_summary(messages, token_budget, context_limit, event=event)
 
@@ -313,11 +545,15 @@ class DefaultAgent:
                 current = candidate
                 continue
             if not current:
-                raise RuntimeError("Single middle message group does not fit in the configured compaction input budget.")
+                raise RuntimeError(
+                    "Single middle message group does not fit in the configured compaction input budget."
+                )
             chunks.append(current)
             current = group
             if self._estimate_api_tokens(self._compaction_summary_messages(current, token_budget)) > input_budget:
-                raise RuntimeError("Single middle message group does not fit in the configured compaction input budget.")
+                raise RuntimeError(
+                    "Single middle message group does not fit in the configured compaction input budget."
+                )
         if current:
             chunks.append(current)
 
@@ -337,7 +573,7 @@ class DefaultAgent:
             chunk_summary_messages.append(
                 self.model.format_message(
                     role="user",
-                    content=f"<compact_chunk_summary index=\"{i}\">\n{summary.strip()}\n</compact_chunk_summary>",
+                    content=f'<compact_chunk_summary index="{i}">\n{summary.strip()}\n</compact_chunk_summary>',
                 )
             )
         return self._summarize_bounded(chunk_summary_messages, token_budget, context_limit, depth=depth + 1)
@@ -384,7 +620,9 @@ class DefaultAgent:
         tail_tokens = self._estimate_api_tokens(tail)
         summary_target = target - head_tokens - tail_tokens
         if summary_target <= 0:
-            raise RuntimeError("Configured compaction target leaves no room for a summary after preserving head and tail.")
+            raise RuntimeError(
+                "Configured compaction target leaves no room for a summary after preserving head and tail."
+            )
         middle = self.messages[2:tail_start]
         if not middle:
             compaction_logger.info("Skipping context compaction: no older middle history to summarize")
@@ -518,8 +756,9 @@ class DefaultAgent:
         request_tokens = self._estimate_api_tokens(request_messages)
         if limit and request_tokens > limit:
             raise RuntimeError(f"Model request exceeds context limit: input={request_tokens}, limit={limit}")
+        readable_debug_callback = self._readable_debug_callback("model_call", input_tokens=request_tokens)
         try:
-            message = self.model.query(self.messages)
+            message = self.model.query(self.messages, readable_debug_callback=readable_debug_callback)
         except Exception as e:
             self._write_debug_event(
                 "model_call",
@@ -530,6 +769,7 @@ class DefaultAgent:
                 error=repr(e),
             )
             raise
+        self._assert_readable_debug_callback_used(readable_debug_callback)
         self.cost += message.get("extra", {}).get("cost", 0.0)
         self._write_debug_event(
             "model_call",

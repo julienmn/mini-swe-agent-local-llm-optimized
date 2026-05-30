@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import time
-from copy import deepcopy
 from typing import Any
 
 import requests
@@ -19,11 +18,6 @@ from minisweagent.models.utils.openai_multimodal import expand_multimodal_conten
 logger = logging.getLogger("ollama_model")
 
 LITELLM_ONLY_OPTIONS = {"drop_params"}
-OLLAMA_BASH_TOOL = deepcopy(BASH_TOOL)
-OLLAMA_BASH_TOOL["function"]["description"] = (
-    "Execute a bash command. Conserve context: do not dump whole files unless they are known small. "
-    "Prefer targeted reads with rg, sed -n, nl -ba file | sed -n, head, or tail."
-)
 
 
 class OllamaModelConfig(BaseModel):
@@ -75,7 +69,9 @@ class OllamaModel:
             options["num_predict"] = max_completion_tokens
         return options
 
-    def _query(self, messages: list[dict[str, str]], *, tools: bool = True, **kwargs) -> dict:
+    def _query(
+        self, messages: list[dict[str, str]], *, tools: bool = True, readable_debug_callback=None, **kwargs
+    ) -> dict:
         payload = {
             "model": self.config.model_name,
             "messages": messages,
@@ -83,7 +79,7 @@ class OllamaModel:
             "options": self._options(kwargs),
         }
         if tools:
-            payload["tools"] = [OLLAMA_BASH_TOOL]
+            payload["tools"] = [BASH_TOOL]
         body = json.dumps(payload)
         headers = {"Content-Type": "application/json"}
         self._last_provider_request = {
@@ -98,6 +94,8 @@ class OllamaModel:
         self._last_provider_response = None
 
         try:
+            if readable_debug_callback:
+                readable_debug_callback("request", provider="ollama", payload=payload)
             response = requests.post(
                 self._api_url,
                 headers=headers,
@@ -107,15 +105,21 @@ class OllamaModel:
             response.raise_for_status()
             response_json = response.json()
             self._last_provider_response = response_json
+            if readable_debug_callback:
+                readable_debug_callback("response", provider="ollama", response=response_json)
             return response_json
         except requests.exceptions.HTTPError as e:
             self._last_provider_response = {
                 "status_code": response.status_code,
                 "text": response.text,
             }
+            if readable_debug_callback:
+                readable_debug_callback("error", provider="ollama", error=repr(e))
             raise OllamaAPIError(f"HTTP {response.status_code}: {response.text}") from e
         except requests.exceptions.RequestException as e:
             self._last_provider_response = {"error": repr(e)}
+            if readable_debug_callback:
+                readable_debug_callback("error", provider="ollama", error=repr(e))
             raise OllamaAPIError(f"Request failed: {e}") from e
 
     def query_text(self, messages: list[dict[str, str]], **kwargs) -> dict:
