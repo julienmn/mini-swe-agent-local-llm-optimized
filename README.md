@@ -1,3 +1,45 @@
+## About this fork
+
+This fork experiments with making `mini-swe-agent` safer and more useful for long autonomous local runs. It keeps the default `mini` workflow, but adds guardrails and debugging support aimed at reducing context blowups and making model behavior easier to audit.
+
+For a more isolated long-running local workflow, I typically run it like this:
+
+```bash
+mini -c mini -c environment.cwd="$PWD" --debug-exchanges --environment-class bubblewrap --yolo
+```
+
+The local configuration I use is similar to this. Replace the Ollama host with your own local or LAN endpoint:
+
+```env
+MSWEA_CONFIGURED=true
+MSWEA_MODEL_CLASS=ollama
+
+OLLAMA_API_BASE=http://YOUR_OLLAMA_HOST:11434
+MSWEA_OLLAMA_TIMEOUT=900
+MSWEA_MODEL_NAME=qwen3-coder:30b
+
+MAX_INPUT_TOKENS=19456
+
+MSWEA_CONTEXT_COMPACT_AT=60
+MSWEA_CONTEXT_COMPACT_TO=30
+MSWEA_CONTEXT_TAIL_TARGET_PERCENT=50
+MSWEA_OBSERVATION_OUTPUT_LIMIT=3000
+```
+
+While I work on integrating this better, these task prompt hints tend to produce better results:
+
+```text
+Do not attempt a fix without having first reproduced the exact issue in a new test.
+Do not claim the task is completed without first having implemented a professional fix that makes the reproducing test pass honestly.
+Do not claim the task is completed without first having proved that you implemented the right change based of the result from git diff.
+
+Project additional info:
+- Comment: Do not include the poetry line below if the project is not using poetry.
+- This project uses poetry; Tests must be run with "poetry run pytest ..."; "poetry run python ..." to execute code.
+- This project use git; you are not allowed to add, commit or push.
+- Prefer using git checkout to restore files instead of creating backups.
+```
+
 <div align="center">
 <a href="https://mini-swe-agent.com/latest/"><img src="https://github.com/SWE-agent/mini-swe-agent/raw/main/docs/assets/mini-swe-agent-banner.svg" alt="mini-swe-agent banner" style="height: 7em"/></a>
 </div>
