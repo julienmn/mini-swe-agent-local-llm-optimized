@@ -488,7 +488,7 @@ class DefaultAgent:
             "Summarize a mini-swe-agent run so the same run can continue. "
             "Do not call tools. Preserve enough concrete detail for the next model call to continue safely. "
             "Include these headings: "
-            "current objective, files inspected, files modified, commands run, important test results, "
+            "current objective, files inspected, files modified, helpful commands run, important test results, "
             "failed approaches, current plan, remaining TODOs, important facts that must not be forgotten.\n\n"
             f"Target length: {token_budget} tokens. This is a target, not a hard maximum; "
             "do not omit important facts just to make the summary shorter.\n\n"
