@@ -1,6 +1,12 @@
 ## About this fork
 
-This fork experiments with making `mini-swe-agent` safer and more useful for long autonomous local runs. It keeps the default `mini` workflow, but adds guardrails and debugging support aimed at reducing context blowups and making model behavior easier to audit.
+This fork experiments with making `mini-swe-agent` more practical for long autonomous local runs with Ollama. It keeps the default `mini` workflow and adds:
+
+- Native Ollama `/api/chat` support, including optional thinking mode.
+- Readable streamed thinking, responses, and structured bash tool calls in the terminal.
+- Context compaction controls for long runs, with non-thinking compaction by default.
+- Raw, delimited command observations so source code and shell output are not obscured by JSON escaping.
+- Debug exchange logs for auditing model requests and responses.
 
 For a more isolated long-running local workflow, I typically run it like this:
 
@@ -16,9 +22,12 @@ MSWEA_MODEL_CLASS=ollama
 
 OLLAMA_API_BASE=http://YOUR_OLLAMA_HOST:11434
 MSWEA_OLLAMA_TIMEOUT=900
-MSWEA_MODEL_NAME=qwen3-coder:30b
+MSWEA_MODEL_NAME=qwen3.6:27b
+MSWEA_OLLAMA_THINK=true
+MSWEA_OLLAMA_COMPACTION_THINK=false
+MSWEA_OLLAMA_STREAM=true
 
-MAX_INPUT_TOKENS=19456
+MAX_INPUT_TOKENS=32768
 
 MSWEA_CONTEXT_COMPACT_AT=60
 MSWEA_CONTEXT_COMPACT_TO=30
@@ -26,18 +35,12 @@ MSWEA_CONTEXT_TAIL_TARGET_PERCENT=50
 MSWEA_OBSERVATION_OUTPUT_LIMIT=3000
 ```
 
-While I work on integrating this better, these task prompt hints tend to produce better results:
+For local coding tasks, a tightly bounded task prompt tends to work better than a generic workflow. State the working directory, intended behavior, allowed scope, and expected verification. For example:
 
 ```text
-Do not attempt a fix without having first reproduced the exact issue in a new test.
-Do not claim the task is completed without first having implemented a professional fix that makes the reproducing test pass honestly.
-Do not claim the task is completed without first having proved that you implemented the right change based of the result from git diff.
-
-Project additional info:
-- Comment: Do not include the poetry line below if the project is not using poetry.
-- This project uses poetry; Tests must be run with "poetry run pytest ..."; "poetry run python ..." to execute code.
-- This project use git; you are not allowed to add, commit or push.
-- Prefer using git checkout to restore files instead of creating backups.
+Work only in the current project directory. Make the smallest clean change that achieves the requested behavior.
+Do not inspect unrelated directories or system configuration. Verify the source diff and run the relevant bounded test from the project root.
+If the environment blocks the test, report the exact limitation and do not attempt to reconfigure the system.
 ```
 
 <div align="center">
