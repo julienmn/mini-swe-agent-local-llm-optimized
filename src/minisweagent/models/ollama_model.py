@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import time
-from typing import Any
+from typing import Any, Literal
 
 import requests
 from pydantic import BaseModel, Field
@@ -18,6 +18,8 @@ from minisweagent.models.utils.openai_multimodal import expand_multimodal_conten
 logger = logging.getLogger("ollama_model")
 
 LITELLM_ONLY_OPTIONS = {"drop_params"}
+ThinkingLevel = Literal["low", "medium", "high", "max"]
+ThinkingMode = bool | ThinkingLevel
 
 
 class OllamaModelConfig(BaseModel):
@@ -27,6 +29,18 @@ class OllamaModelConfig(BaseModel):
     """Ollama server base URL."""
     timeout: float = Field(default_factory=lambda: float(os.getenv("MSWEA_OLLAMA_TIMEOUT", "600")))
     """HTTP request timeout in seconds."""
+    think: ThinkingMode | None = Field(
+        default_factory=lambda: os.getenv("MSWEA_OLLAMA_THINK"), validate_default=True
+    )
+    """Ollama thinking mode. None leaves the model default unchanged."""
+    compaction_think: ThinkingMode = Field(
+        default_factory=lambda: os.getenv("MSWEA_OLLAMA_COMPACTION_THINK", "false"), validate_default=True
+    )
+    """Thinking mode for internal context-compaction summaries."""
+    stream: bool = Field(default_factory=lambda: os.getenv("MSWEA_OLLAMA_STREAM", "true"), validate_default=True)
+    """Stream normal model responses from Ollama."""
+    compaction_stream: bool = False
+    """Stream internal context-compaction summaries."""
     model_kwargs: dict[str, Any] = {}
     """Runtime options passed to Ollama's options object."""
     format_error_template: str = "{{ error }}"
@@ -59,7 +73,7 @@ class OllamaModel:
 
     def _options(self, kwargs: dict) -> dict:
         options = self.config.model_kwargs | kwargs
-        for key in LITELLM_ONLY_OPTIONS:
+        for key in LITELLM_ONLY_OPTIONS | {"think"}:
             options.pop(key, None)
         max_tokens = options.pop("max_tokens", None)
         if max_tokens is not None:
@@ -72,14 +86,19 @@ class OllamaModel:
     def _query(
         self, messages: list[dict[str, str]], *, tools: bool = True, readable_debug_callback=None, **kwargs
     ) -> dict:
+        think = kwargs.pop("think", self.config.think)
+        stream = kwargs.pop("stream", self.config.stream)
+        stream_callback = kwargs.pop("stream_callback", None)
         payload = {
             "model": self.config.model_name,
             "messages": messages,
-            "stream": False,
+            "stream": stream,
             "options": self._options(kwargs),
         }
         if tools:
             payload["tools"] = [BASH_TOOL]
+        if think is not None:
+            payload["think"] = think
         body = json.dumps(payload)
         headers = {"Content-Type": "application/json"}
         self._last_provider_request = {
@@ -101,9 +120,10 @@ class OllamaModel:
                 headers=headers,
                 data=body,
                 timeout=self.config.timeout,
+                stream=stream,
             )
             response.raise_for_status()
-            response_json = response.json()
+            response_json = self._collect_stream(response, stream_callback) if stream else response.json()
             self._last_provider_response = response_json
             if readable_debug_callback:
                 readable_debug_callback("response", provider="ollama", response=response_json)
@@ -122,10 +142,41 @@ class OllamaModel:
                 readable_debug_callback("error", provider="ollama", error=repr(e))
             raise OllamaAPIError(f"Request failed: {e}") from e
 
+    @staticmethod
+    def _collect_stream(response, stream_callback) -> dict:
+        result, message = {}, {}
+        for line in response.iter_lines():
+            if not line:
+                continue
+            chunk = json.loads(line)
+            delta = chunk.get("message", {})
+            for key, value in chunk.items():
+                if key != "message":
+                    result[key] = value
+            for key in ("content", "thinking"):
+                if key in delta:
+                    message[key] = message.get(key, "") + (delta[key] or "")
+            if delta.get("tool_calls"):
+                message.setdefault("tool_calls", []).extend(delta["tool_calls"])
+            for key, value in delta.items():
+                if key not in {"content", "thinking", "tool_calls"}:
+                    message[key] = value
+            if stream_callback and delta:
+                stream_callback(delta)
+        result["message"] = message
+        return result
+
     def query_text(self, messages: list[dict[str, str]], **kwargs) -> dict:
         response = self._query(self._prepare_messages_for_api(messages), tools=False, **kwargs)
         message = response.get("message", {})
         return {"choices": [{"message": message}], "usage": self._usage(response)}
+
+    def compaction_query_kwargs(self) -> dict:
+        return {"think": self.config.compaction_think, "stream": self.config.compaction_stream}
+
+    @staticmethod
+    def stream_query_kwargs(callback) -> dict:
+        return {"stream_callback": callback}
 
     def _prepare_messages_for_api(self, messages: list[dict]) -> list[dict]:
         prepared = []

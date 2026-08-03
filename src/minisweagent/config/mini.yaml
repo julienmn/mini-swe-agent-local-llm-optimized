@@ -115,20 +115,30 @@ model:
     {%- set output_head_chars = output_limit // 2 -%}
     {%- set output_tail_chars = output_limit - output_head_chars -%}
     {%- if output.output | length < output_limit -%}
-    {
-      "returncode": {{ output.returncode }},
-      "output": {{ output.output | tojson }}
-      {%- if output.exception_info %}, "exception_info": {{ output.exception_info | tojson }}{% endif %}
-    }
+    <returncode>{{ output.returncode }}</returncode>
+    {%- if output.exception_info %}
+    <exception>
+    {{ output.exception_info }}
+    </exception>
+    {%- endif %}
+    <output>
+    {{ output.output }}
+    </output>
     {%- else -%}
-    {
-      "returncode": {{ output.returncode }},
-      "output_head": {{ output.output[:output_head_chars] | tojson }},
-      "output_tail": {{ output.output[-output_tail_chars:] | tojson }},
-      "elided_chars": {{ output.output | length - output_limit }},
-      "warning": "Output too long."
-      {%- if output.exception_info %}, "exception_info": {{ output.exception_info | tojson }}{% endif %}
-    }
+    <returncode>{{ output.returncode }}</returncode>
+    {%- if output.exception_info %}
+    <exception>
+    {{ output.exception_info }}
+    </exception>
+    {%- endif %}
+    <output_head>
+    {{ output.output[:output_head_chars] }}
+    </output_head>
+    <output_tail>
+    {{ output.output[-output_tail_chars:] }}
+    </output_tail>
+    <elided_chars>{{ output.output | length - output_limit }}</elided_chars>
+    <warning>Output too long.</warning>
     {%- endif -%}
   format_error_template: |
     {% if finish_reason is defined and (finish_reason == "length" or (finish_reason == "tool_calls" and not has_tool_calls)) -%}

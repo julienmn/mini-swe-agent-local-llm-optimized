@@ -885,6 +885,7 @@ def test_debug_exchange_log_records_ollama_provider_payload(tmp_path, monkeypatc
             ],
         }
     }
+    response.iter_lines = lambda: [json.dumps(response.json()).encode()]
 
     def fake_post(*args, **kwargs):
         return response
@@ -920,6 +921,7 @@ def test_readable_debug_exchange_records_ollama_provider_payload(tmp_path, monke
             ],
         }
     }
+    response.iter_lines = lambda: [json.dumps(response.json()).encode()]
 
     monkeypatch.setattr("requests.post", lambda *args, **kwargs: response)
     agent = DefaultAgent(
@@ -1072,6 +1074,9 @@ def test_context_compaction_chunks_middle_before_oversized_summary_call(tmp_path
             self.text_calls.append((messages, kwargs))
             return {"choices": [{"message": {"role": "assistant", "content": f"summary {len(self.text_calls)}"}}]}
 
+        def compaction_query_kwargs(self):
+            return {"think": False}
+
     model = RecordingTextModel()
     debug_path = tmp_path / "debug.jsonl"
     agent = DefaultAgent(
@@ -1088,6 +1093,7 @@ def test_context_compaction_chunks_middle_before_oversized_summary_call(tmp_path
     assert len(model.text_calls) > 1
     for messages, kwargs in model.text_calls:
         assert agent._estimate_api_tokens(messages) + kwargs["max_tokens"] <= 1000
+        assert kwargs["think"] is False
     assert [event for event in events if event["event"] == "compaction_chunk_planned"]
     assert [event for event in events if event["event"] == "compaction_chunk_summary_call"]
     assert [event for event in events if event["event"] == "compaction_final_summary_call"]

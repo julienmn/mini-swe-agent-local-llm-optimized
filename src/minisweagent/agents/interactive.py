@@ -6,12 +6,14 @@ There are three modes:
 - yolo: commands issued by the LM are executed immediately without confirmation
 """
 
+import json
 import re
 import sys
 from typing import Literal, NoReturn
 
 from rich.console import Console
 from rich.rule import Rule
+from rich.status import Status
 
 from minisweagent.agents.default import AgentConfig, DefaultAgent
 from minisweagent.agents.utils.prompt_user import _multiline_prompt, prompt_session
@@ -36,6 +38,10 @@ class InteractiveAgent(DefaultAgent):
     def __init__(self, *args, config_class=InteractiveAgentConfig, **kwargs):
         super().__init__(*args, config_class=config_class, **kwargs)
         self.cost_last_confirmed = 0.0
+        self._streamed_response = False
+        self._stream_status: Status | None = None
+        self._streamed_thinking = False
+        self._streamed_content = False
 
     def _interrupt(self, content: str, *, itype: str = "UserInterruption") -> NoReturn:
         raise UserInterruption({"role": "user", "content": content, "extra": {"interrupt_type": itype}})
@@ -45,6 +51,9 @@ class InteractiveAgent(DefaultAgent):
         for msg in messages:
             role, content = msg.get("role") or msg.get("type", "unknown"), get_content_string(msg)
             if role == "assistant":
+                if self._streamed_response:
+                    self._streamed_response = False
+                    continue
                 console.print(
                     f"\n[red][bold]mini-swe-agent[/bold] (step [bold]{self.n_calls}[/bold], [bold]${self.cost:.2f}[/bold]):[/red]\n",
                     end="",
@@ -54,6 +63,36 @@ class InteractiveAgent(DefaultAgent):
                 console.print(f"\n[bold green]{role.capitalize()}[/bold green]:\n", end="", highlight=False)
             console.print(content, highlight=False, markup=False)
         return super().add_messages(*messages)
+
+    def _stream_callback(self, delta: dict) -> None:
+        thinking, content, tool_calls = delta.get("thinking"), delta.get("content"), delta.get("tool_calls")
+        if not (thinking or content or tool_calls):
+            return
+        if self._stream_status is not None:
+            self._stream_status.stop()
+            self._stream_status = None
+        if not self._streamed_response:
+            console.print(
+                f"\n[red][bold]mini-swe-agent[/bold] (step [bold]{self.n_calls}[/bold], [bold]${self.cost:.2f}[/bold]):[/red]"
+            )
+            self._streamed_response = True
+        if thinking:
+            if not self._streamed_thinking:
+                console.print("[bold yellow]Thinking:[/bold yellow]")
+                self._streamed_thinking = True
+            console.print(thinking, end="", highlight=False, markup=False)
+        if content:
+            if not self._streamed_content:
+                console.print("\n[bold blue]Response:[/bold blue]")
+                self._streamed_content = True
+            console.print(content, end="", highlight=False, markup=False)
+        for tool_call in tool_calls or []:
+            function = tool_call.get("function", {})
+            name = function.get("name", "unknown")
+            arguments = function.get("arguments", {})
+            command = arguments.get("command") if isinstance(arguments, dict) else None
+            console.print(f"\n[bold cyan]Tool call: {name}[/bold cyan]")
+            console.print(command or json.dumps(arguments, ensure_ascii=False), highlight=False, markup=False)
 
     def query(self) -> dict:
         # Extend supermethod to handle human mode
@@ -70,7 +109,11 @@ class InteractiveAgent(DefaultAgent):
                     self.add_messages(msg)
                     return msg
         try:
-            with console.status("Waiting for the LM to respond..."):
+            self._streamed_response = False
+            self._streamed_thinking = False
+            self._streamed_content = False
+            with console.status("Waiting for the LM to respond...") as status:
+                self._stream_status = status
                 return super().query()
         except TimeExceeded:
             # A wall-clock limit can't be lifted by raising the step/cost limits
@@ -92,6 +135,8 @@ class InteractiveAgent(DefaultAgent):
             self.config.step_limit = int(input("New step limit: "))
             self.config.cost_limit = float(input("New cost limit: "))
             return super().query()
+        finally:
+            self._stream_status = None
 
     @staticmethod
     def _stdin_is_interactive() -> bool:

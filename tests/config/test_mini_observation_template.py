@@ -24,9 +24,9 @@ def test_mini_observation_template_uses_existing_default_limit():
 
     result = _render_mini_observation(output)
 
-    assert '"output_head": "' + ("A" * 5000) in result
-    assert '"output_tail": "' + ("B" * 5000) in result
-    assert '"elided_chars": 1000' in result
+    assert "<output_head>\n" + ("A" * 5000) in result
+    assert "<output_tail>\n" + ("B" * 5000) in result
+    assert "<elided_chars>1000</elided_chars>" in result
 
 
 def test_mini_observation_template_uses_configured_limit_split_half_head_tail():
@@ -34,9 +34,9 @@ def test_mini_observation_template_uses_configured_limit_split_half_head_tail():
 
     result = _render_mini_observation(output, MSWEA_OBSERVATION_OUTPUT_LIMIT="5000")
 
-    assert '"output_head": "' + ("A" * 2500) in result
-    assert '"output_tail": "' + ("B" * 2500) in result
-    assert '"elided_chars": 1000' in result
+    assert "<output_head>\n" + ("A" * 2500) in result
+    assert "<output_tail>\n" + ("B" * 2500) in result
+    assert "<elided_chars>1000</elided_chars>" in result
 
 
 def test_mini_observation_template_short_output_uses_full_output_with_configured_limit():
@@ -44,6 +44,13 @@ def test_mini_observation_template_short_output_uses_full_output_with_configured
 
     result = _render_mini_observation(output, MSWEA_OBSERVATION_OUTPUT_LIMIT="5000")
 
-    assert '"output": "short output"' in result
+    assert "<output>\nshort output\n</output>" in result
     assert "output_head" not in result
     assert "output_tail" not in result
+
+
+def test_mini_observation_template_preserves_shell_output_verbatim():
+    result = _render_mini_observation(MockOutput(returncode=0, output="if value >= 3:\n    print('<ok>')\n"))
+
+    assert "if value >= 3:" in result
+    assert "\\u003e" not in result

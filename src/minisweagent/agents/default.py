@@ -515,8 +515,12 @@ class DefaultAgent:
         if text_query:
             prepared_messages = self._prepared_messages_for_debug(summary_messages)
             readable_debug_callback = self._readable_debug_callback(event, input_tokens=request_tokens)
+            compaction_query_kwargs = getattr(self.model, "compaction_query_kwargs", lambda: {})()
             response = text_query(
-                summary_messages, max_tokens=token_budget, readable_debug_callback=readable_debug_callback
+                summary_messages,
+                max_tokens=token_budget,
+                readable_debug_callback=readable_debug_callback,
+                **compaction_query_kwargs,
             )
             self._assert_readable_debug_callback_used(readable_debug_callback)
             if hasattr(response, "model_dump"):
@@ -530,7 +534,7 @@ class DefaultAgent:
                 request_messages=summary_messages,
                 prepared_messages=prepared_messages,
                 input_tokens=request_tokens,
-                request_kwargs={"max_tokens": token_budget},
+                request_kwargs={"max_tokens": token_budget, **compaction_query_kwargs},
                 raw_response=response,
                 **self._provider_exchange_for_debug(),
                 summary=summary,
@@ -815,8 +819,16 @@ class DefaultAgent:
         if limit and request_tokens > limit:
             raise RuntimeError(f"Model request exceeds context limit: input={request_tokens}, limit={limit}")
         readable_debug_callback = self._readable_debug_callback("model_call", input_tokens=request_tokens)
+        stream_callback = getattr(self, "_stream_callback", None)
+        stream_query_kwargs = (
+            self.model.stream_query_kwargs(stream_callback)
+            if stream_callback and hasattr(self.model, "stream_query_kwargs")
+            else {}
+        )
         try:
-            message = self.model.query(self.messages, readable_debug_callback=readable_debug_callback)
+            message = self.model.query(
+                self.messages, readable_debug_callback=readable_debug_callback, **stream_query_kwargs
+            )
         except Exception as e:
             self._write_debug_event(
                 "model_call",

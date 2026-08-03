@@ -13,6 +13,7 @@ from minisweagent.models.utils.actions_toolcall import BASH_TOOL
 def _mock_response(payload: dict):
     response = Mock()
     response.json.return_value = payload
+    response.iter_lines.return_value = [json.dumps(payload).encode()]
     response.raise_for_status.return_value = None
     return response
 
@@ -30,7 +31,7 @@ def test_query_sends_native_chat_tools():
     payload = {
         "message": {
             "role": "assistant",
-            "content": None,
+            "content": "",
             "tool_calls": [{"function": {"name": "bash", "arguments": {"command": "echo test"}}}],
         },
         "prompt_eval_count": 10,
@@ -49,8 +50,9 @@ def test_query_sends_native_chat_tools():
     request = json.loads(mock_post.call_args.kwargs["data"])
     assert request["model"] == "qwen3-coder:30b"
     assert request["messages"] == [{"role": "user", "content": "test"}]
-    assert request["stream"] is False
+    assert request["stream"] is True
     assert request["tools"] == [BASH_TOOL]
+    assert "think" not in request
     assert request["options"] == {"temperature": 0}
     assert "Produce JSON OUTPUT ONLY" not in mock_post.call_args.kwargs["data"]
     assert model._last_provider_request["url"] == "http://localhost:11434/api/chat"
@@ -60,6 +62,57 @@ def test_query_sends_native_chat_tools():
     assert model._last_provider_response == payload
     assert result["extra"]["actions"] == [{"command": "echo test", "tool_call_id": "call_ollama_0"}]
     assert result["extra"]["cost"] == 0.0
+
+
+def test_streaming_assembles_response_and_reports_deltas():
+    chunks = [
+        {"message": {"role": "assistant", "thinking": "Inspect "}, "done": False},
+        {
+            "message": {
+                "content": "now.",
+                "tool_calls": [{"function": {"name": "bash", "arguments": {"command": "pwd"}}}],
+            },
+            "done": True,
+        },
+    ]
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.iter_lines.return_value = [json.dumps(chunk).encode() for chunk in chunks]
+    deltas = []
+    model = OllamaModel(model_name="qwen3-coder:30b")
+
+    with patch("requests.post", return_value=response):
+        result = model.query([{"role": "user", "content": "test"}], stream_callback=deltas.append)
+
+    assert result["thinking"] == "Inspect "
+    assert result["content"] == "now."
+    assert result["extra"]["actions"][0]["command"] == "pwd"
+    assert deltas == [chunk["message"] for chunk in chunks]
+
+
+@pytest.mark.parametrize(("think", "expected"), [(True, True), (False, False), ("high", "high")])
+def test_thinking_mode_is_sent_top_level(think, expected):
+    payload = {
+        "message": {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"function": {"name": "bash", "arguments": {"command": "echo test"}}}],
+        },
+    }
+    model = OllamaModel(model_name="qwen3-coder:30b", think=think, model_kwargs={"think": "wrong"})
+
+    with patch("requests.post", return_value=_mock_response(payload)) as mock_post:
+        model.query([{"role": "user", "content": "test"}])
+
+    request = json.loads(mock_post.call_args.kwargs["data"])
+    assert request["think"] == expected
+    assert "think" not in request["options"]
+
+
+def test_compaction_thinking_defaults_off():
+    model = OllamaModel(model_name="qwen3-coder:30b", think=True)
+
+    assert model.compaction_query_kwargs() == {"think": False, "stream": False}
 
 
 def test_query_uses_config_timeout_without_sending_option():
@@ -99,9 +152,14 @@ def test_litellm_only_options_are_not_sent_to_ollama():
 
 def test_timeout_from_env(monkeypatch):
     monkeypatch.setenv("MSWEA_OLLAMA_TIMEOUT", "321")
+    monkeypatch.setenv("MSWEA_OLLAMA_THINK", "true")
+    monkeypatch.setenv("MSWEA_OLLAMA_COMPACTION_THINK", "high")
 
     assert OllamaModel(model_name="qwen3-coder:30b").config.timeout == 321
+    assert OllamaModel(model_name="qwen3-coder:30b").config.think is True
+    assert OllamaModel(model_name="qwen3-coder:30b").config.compaction_think == "high"
     assert OllamaModel(model_name="qwen3-coder:30b", timeout=123).config.timeout == 123
+    assert OllamaModel(model_name="qwen3-coder:30b", think=False).config.think is False
 
 
 def test_query_text_sends_no_tools_and_maps_max_tokens():
@@ -154,6 +212,18 @@ def test_missing_tool_calls_raises_format_error():
     with patch("requests.post", return_value=_mock_response(payload)):
         with pytest.raises(FormatError):
             model.query([{"role": "user", "content": "test"}])
+
+
+@pytest.mark.parametrize("think", [True, False, "medium"])
+def test_tool_call_recovery_error_is_not_changed_by_thinking_mode(think):
+    model = OllamaModel(model_name="qwen3-coder:30b", think=think)
+    payload = {"message": {"role": "assistant", "content": "no tool"}}
+
+    with patch("requests.post", return_value=_mock_response(payload)):
+        with pytest.raises(FormatError) as error:
+            model.query([{"role": "user", "content": "test"}])
+
+    assert "Never write <tool_call>" not in error.value.messages[0]["content"]
 
 
 def test_format_observation_messages_adds_tool_name():
