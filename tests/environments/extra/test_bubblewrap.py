@@ -246,7 +246,7 @@ def test_bubblewrap_environment_custom_wrapper_args():
 
 def test_bubblewrap_environment_get_template_vars():
     """Test get_template_vars method returns expected data."""
-    env = BubblewrapEnvironment(env={"TEST_VAR": "test_value"})
+    env = BubblewrapEnvironment(env={"TEST_VAR": "test_value", "MSWEA_OBSERVATION_OUTPUT_LIMIT": "3000"})
 
     try:
         template_vars = env.get_template_vars()
@@ -257,6 +257,8 @@ def test_bubblewrap_environment_get_template_vars():
         assert template_vars["env"]["TEST_VAR"] == "test_value"
         assert "timeout" in template_vars
         assert template_vars["timeout"] == 30
+        assert template_vars["MSWEA_OBSERVATION_OUTPUT_LIMIT"] == "3000"
+        assert "TEST_VAR" not in template_vars
 
         # Should contain platform info
         assert "system" in template_vars

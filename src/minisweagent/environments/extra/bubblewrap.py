@@ -138,7 +138,19 @@ class BubblewrapEnvironment:
         self.cleanup()
 
     def get_template_vars(self, **kwargs) -> dict[str, Any]:
-        return recursive_merge(self.config.model_dump(), platform.uname()._asdict(), kwargs)
+        return recursive_merge(
+            self.config.model_dump(),
+            platform.uname()._asdict(),
+            (
+                {"MSWEA_OBSERVATION_OUTPUT_LIMIT": output_limit}
+                if (
+                    output_limit := self.config.env.get("MSWEA_OBSERVATION_OUTPUT_LIMIT")
+                    or os.getenv("MSWEA_OBSERVATION_OUTPUT_LIMIT")
+                )
+                else {}
+            ),
+            kwargs,
+        )
 
     def serialize(self) -> dict:
         return {
