@@ -33,6 +33,7 @@ MSWEA_CONTEXT_COMPACT_AT=60
 MSWEA_CONTEXT_COMPACT_TO=30
 MSWEA_CONTEXT_TAIL_TARGET_PERCENT=50
 MSWEA_OBSERVATION_OUTPUT_LIMIT=3000
+MSWEA_WHOLE_FILE_READ_MAX_LINES=50
 ```
 
 For local coding tasks, a tightly bounded task prompt tends to work better than a generic workflow. State the working directory, intended behavior, allowed scope, and expected verification. For example:
