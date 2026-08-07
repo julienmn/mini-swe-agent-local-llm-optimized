@@ -12,7 +12,7 @@ import traceback
 from pathlib import Path
 
 from jinja2 import StrictUndefined, Template
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from minisweagent import Environment, Model, __version__
 from minisweagent.exceptions import FormatError, InterruptAgentFlow, LimitsExceeded, TimeExceeded
@@ -72,8 +72,30 @@ def is_forbidden_whole_file_cat(command: str) -> bool:
     return False
 
 
-def forbidden_whole_file_cat_output() -> dict:
-    return {"output": WHOLE_FILE_CAT_FORBIDDEN_OUTPUT, "returncode": 1, "exception_info": ""}
+def whole_file_cat_forbidden_message(max_lines: int = 0) -> str:
+    if max_lines:
+        return f"Output of files larger than {max_lines} lines is forbidden. Use bounded reads instead."
+    return WHOLE_FILE_CAT_FORBIDDEN_OUTPUT
+
+
+def forbidden_whole_file_cat_output(max_lines: int = 0) -> dict:
+    return {"output": whole_file_cat_forbidden_message(max_lines), "returncode": 1, "exception_info": ""}
+
+
+def _whole_file_cat_path(command: str) -> str | None:
+    try:
+        tokens = _shell_tokens(command)
+    except ValueError:
+        return None
+    return tokens[1] if len(tokens) == 2 and tokens[0] == "cat" else None
+
+
+def _bounded_whole_file_cat_command(path: str, max_lines: int) -> str:
+    quoted_path = shlex.quote(path)
+    return (
+        f'line_count=$(wc -l < {quoted_path}) && if [ "$line_count" -le {max_lines} ]; then '
+        f'cat -- {quoted_path}; else printf "%s\\n" {shlex.quote(whole_file_cat_forbidden_message(max_lines))}; exit 1; fi'
+    )
 
 
 class AgentConfig(BaseModel):
@@ -91,6 +113,10 @@ class AgentConfig(BaseModel):
     """Stop agent after this many seconds of wall-clock time. 0 means no limit."""
     max_consecutive_format_errors: int = 3
     """Exit after this many format errors in a row (0 = no limit)."""
+    whole_file_read_max_lines: int = Field(
+        default_factory=lambda: int(os.getenv("MSWEA_WHOLE_FILE_READ_MAX_LINES", "0")), ge=0
+    )
+    """Allow simple whole-file reads up to this many lines (0 = forbid all)."""
     output_path: Path | None = None
     """Save the trajectory to this path."""
     debug_exchange_path: Path | None = None
@@ -490,8 +516,8 @@ class DefaultAgent:
             "Include these headings: "
             "current objective, files inspected, files modified, helpful commands run, important test results, "
             "failed approaches, current plan, remaining TODOs, important facts that must not be forgotten.\n\n"
-            f"Target length: {token_budget} tokens. This is a target, not a hard maximum; "
-            "do not omit important facts just to make the summary shorter.\n\n"
+            f"Target length: {token_budget} tokens. Use most of this budget for a detailed summary; "
+            "do not finish early for brevity.\n\n"
             f"Messages to summarize:\n{messages_json}"
         )
         return [
@@ -875,8 +901,19 @@ class DefaultAgent:
         return self.add_messages(*observation_messages)
 
     def _execute_action(self, action: dict) -> dict:
-        if is_forbidden_whole_file_cat(action.get("command", "")):
-            return forbidden_whole_file_cat_output()
+        command = action.get("command", "")
+        if is_forbidden_whole_file_cat(command):
+            if path := _whole_file_cat_path(command):
+                if self.config.whole_file_read_max_lines:
+                    return self.env.execute(
+                        {
+                            **action,
+                            "command": _bounded_whole_file_cat_command(
+                                path, self.config.whole_file_read_max_lines
+                            ),
+                        }
+                    )
+            return forbidden_whole_file_cat_output(self.config.whole_file_read_max_lines)
         return self.env.execute(action)
 
     def serialize(self, *extra_dicts) -> dict:

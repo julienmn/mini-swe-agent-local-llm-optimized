@@ -244,6 +244,30 @@ def test_default_agent_rejects_whole_file_cat_without_executing():
     assert WHOLE_FILE_CAT_FORBIDDEN_OUTPUT in get_observation_text(observations[0])
 
 
+@pytest.mark.parametrize(
+    ("line_count", "expected_returncode", "expected_output"),
+    [
+        (50, 0, "line 50"),
+        (51, 1, "Output of files larger than 50 lines is forbidden."),
+    ],
+)
+def test_default_agent_limits_whole_file_reads_by_line_count(
+    tmp_path, line_count, expected_returncode, expected_output
+):
+    path = tmp_path / "file.txt"
+    path.write_text("".join(f"line {i}\n" for i in range(1, line_count + 1)))
+    agent = DefaultAgent(
+        model=make_text_model([]),
+        env=LocalEnvironment(),
+        **minimal_agent_config(whole_file_read_max_lines=50),
+    )
+
+    observations = agent.execute_actions(make_output("Read file", [{"command": f"cat {path}"}]))
+
+    assert f"<returncode>{expected_returncode}</returncode>" in get_observation_text(observations[0])
+    assert expected_output in get_observation_text(observations[0])
+
+
 def test_successful_completion(model_factory):
     """Test agent completes successfully when COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT is encountered."""
     factory, config = model_factory
@@ -979,7 +1003,7 @@ def test_debug_exchange_log_records_compaction_summary_exchange(tmp_path, monkey
     assert summary_events
     assert "Messages to summarize" in summary_events[0]["request_messages"][1]["content"]
     assert f"Target length: {triggered[0]['summary_budget']} tokens." in summary_events[0]["request_messages"][1]["content"]
-    assert "This is a target, not a hard maximum" in summary_events[0]["request_messages"][1]["content"]
+    assert "Use most of this budget for a detailed summary" in summary_events[0]["request_messages"][1]["content"]
     assert summary_events[0]["response_message"]["content"] == "summary with current objective and remaining TODOs"
     assert summary_events[0]["summary"] == "summary with current objective and remaining TODOs"
     assert [event for event in events if event["event"] == "compaction_finished"]
